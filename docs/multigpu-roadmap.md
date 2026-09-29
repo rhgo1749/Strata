@@ -25,6 +25,16 @@ Prefer coarse-grained request/session parallelism while it wins on the workload 
 
 A more sophisticated multi-GPU mechanism is not automatically an improvement. Cross-GPU expert routing, token-level synchronization, dynamic KV movement, or a single-process distributed engine all introduce synchronization and data movement. They should only replace the current lane model after an A/B test shows a material and repeatable gain without reducing stability, required context capacity, or API/agent correctness.
 
+## Latest promotion checkpoint — Strata 0.1.22 (2026-09-29)
+
+The independent-lane baseline was revalidated after syncing upstream Strata 0.1.22 into the fork (`9dda206`). The existing 3-lane launch contract remained unchanged: 262144 context and 32768 resident KV per lane, 5/6/5 physical-core partitioning, 0.55/0.25/0.55 lane PCIe fractions, and one ~39.97 GiB shared expert arena.
+
+On the reference 3 × RTX 5070 Ti host, the promoted 0.1.22 candidate completed the server/multi-GPU test suite, a full CUDA build, three-lane startup, upstream layer-split startup, short decode probes, concurrent warm serving, and a 15K no-reuse prompt-processing probe. The clean warm three-request wall aggregate measured **226.5–227.9 tok/s**, while the 15,064-token no-reuse single-lane prompt processed at **2,492.2 tok/s** in the promotion run.
+
+The same 0.1.22 binary also kept upstream layer-split operational at 262K. In that challenger smoke, layer-split produced **80.6 tok/s** on the short single-request decode probe and **1,142.3 tok/s** on the same-size 15K no-reuse prompt-processing probe. The independent-lane path therefore remains the production baseline: layer-split retains a single-request decode advantage, but it did not clear the roadmap's aggregate/prompt-processing promotion gate for the target concurrent workload.
+
+Reference-host benchmark detail and historical comparisons belong in the public GPU-per-lane recipe repository; this document records only the architecture-level promotion outcome.
+
 ## Phase 1 — Benchmark and observability contract
 
 Before changing the architecture, make the comparison reproducible.

@@ -65,6 +65,12 @@ The production parallelism unit is a whole request or session, not a token, tens
 
 The trade-off is explicit: when only one request is active, other GPU lanes may be idle. More tightly coupled multi-GPU designs remain roadmap challengers and must demonstrate an end-to-end win before promotion.
 
+## Current promoted engine baseline
+
+The shared-lane runtime has been revalidated on the fork after syncing upstream Strata **0.1.22** (`9dda206`). The existing multi-lane launch contract and command-line surface remained compatible; no migration flag was required for the reference 3-lane recipe.
+
+The 0.1.22 promotion retained the shared-arena / independent-lane architecture while inheriting upstream prompt-path optimizations. Reference-host benchmark numbers and historical 0.1.21 comparisons are maintained in the public GPU-per-lane recipe repository rather than duplicated here.
+
 ## Compatibility and limitations
 
 The supervisor proxies Strata's OpenAI-compatible generation endpoints and preserves streaming. Functional serving behavior is covered by repository tests and reusable probes; concrete reference-host soak counts belong in the recipe repository.
