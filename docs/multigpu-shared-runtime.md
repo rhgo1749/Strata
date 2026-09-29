@@ -2,7 +2,7 @@
 
 This fork provides an opt-in Linux runtime that keeps one ordinary Strata engine process per GPU lane while sharing the large host expert arena between processes.
 
-Detailed reference-host hardware, tuning values, benchmark tables, and validation records live in the separate public recipe repository: [`rhgo1749/strata-gpu-per-lane-serving-recipe`](https://github.com/rhgo1749/strata-gpu-per-lane-serving-recipe).
+Detailed reference-host hardware, tuning values, benchmark tables, and validation records live in the separate public recipe repository: [`rhgo1749/qwen3.8-flash-next-strata-gpu-per-lane-recipe`](https://github.com/rhgo1749/qwen3.8-flash-next-strata-gpu-per-lane-recipe).
 
 ## Runtime contract
 
@@ -31,6 +31,25 @@ Every lane keeps its own normally resident GPU weights, GPU hot-expert tier, CUD
 The supervisor can automatically partition physical CPU cores between lanes. It also exposes optional per-lane CPU, PCIe/cache, context, and resident-KV controls for asymmetric hosts.
 
 Those values are intentionally not prescribed here. They are hardware-specific and should be measured on the target system; the public recipe repository contains one concrete reference-host example.
+
+## Hardware guidance
+
+The multi-GPU path is not tied to one GPU model or lane count. The practical rule is that **every selected GPU must first be able to run one usable single-GPU Strata lane**, while the host must have enough RAM, CPU and PCIe capacity for all lanes concurrently.
+
+A concise starting guide:
+
+- shared-arena multi-process mode: Linux;
+- GPU count: 2 or more NVIDIA GPUs;
+- VRAM: satisfy the chosen single-GPU Strata configuration on every lane; 16 GB+ per GPU is a useful multi-lane target for additional hot-cache/KV headroom;
+- RAM: one shared expert arena + every lane's host-KV + OS/runtime headroom;
+- CPU: the current automatic partitioner needs at least 2 physical cores per lane; 4–6 physical cores per active lane is a more practical starting target when available;
+- PCIe: confirm the negotiated link for every card and measure asymmetric lanes rather than copying another host's `pcie-frac` values;
+- storage: SSD, preferably NVMe;
+- NVLink: not required by the normal GPU-per-lane decode path.
+
+The validated 3-lane IQ3_XXS reference configuration uses 128 GB RAM, three 16 GB GPUs, 262K context per lane and a 16-core CPU. Those values are a **validated reference**, not universal minimum requirements.
+
+See [`multigpu-hardware-guide.md`](multigpu-hardware-guide.md) for the sizing rationale, RAM model, CPU/PCIe guidance and bring-up checklist.
 
 ## Host-KV capacity
 
