@@ -67,9 +67,9 @@ The trade-off is explicit: when only one request is active, other GPU lanes may 
 
 ## Current promoted engine baseline
 
-The shared-lane runtime has been revalidated after syncing upstream Strata **0.1.24** in merge commit `82a5161`. The 3-lane launch contract remains unchanged: one engine per GPU, 262144 context and 32768 resident KV per lane on the reference host, disjoint CPU partitions, per-lane PCIe tuning, and one shared expert arena.
+The shared-lane runtime has been revalidated after syncing upstream Strata **0.1.26** in merge commit `44b8221`. The 3-lane launch contract remains unchanged: one engine per GPU, 262144 context and 32768 resident KV per lane on the reference host, disjoint CPU partitions, per-lane PCIe tuning, and one shared expert arena.
 
-The promotion passed 52 server/multi-GPU tests, the production CUDA build, IQ3_XXS and IQ3_S per-lane versus layer-split benchmarks, and a 140K-token no-reuse request on all three lanes concurrently. The supervisor also strips inherited `gpu` / `layer_split` settings from lane configs so an upstream multi-GPU config cannot accidentally re-expand a lane into layer-split mode.
+The 0.1.26 promotion passed the CUDA release build, upstream `file_expert_source_test`, and 79 server/multi-GPU tests (3 skipped). A real 3-lane IQ3_S smoke run then started all three 262K lanes successfully and served three concurrent requests through the supervisor. All lane mappings resolved to the same 50,294,988,800-byte `/dev/shm` backing object with the shared arena reported as `Shared_Dirty` and no private dirty copy per lane. The supervisor continues to strip inherited `gpu` / `layer_split` settings from lane configs so an upstream multi-GPU config cannot accidentally re-expand a lane into layer-split mode.
 
 Adaptive hot-expert replacement remains engine-local to each lane. Optional `STRATA_ADAPT_TRACE` instrumentation records first routed misses, adaptive swap selection/publication, and the first later GPU-resident hit without changing the default serving path when tracing is disabled. Reference-host timing and A/B results live in the public recipe repository.
 
