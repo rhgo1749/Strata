@@ -1002,35 +1002,6 @@ def openai_collect(chunks) -> dict:
             "usage": last["usage"]}
 
 
-def _forced_tool_error(req: dict, response: dict) -> str | None:
-    """Return a production-safety error when OpenAI tool_choice promised a call but the model did not make it.
-
-    The template strongly asks for required/named tool calls, but stochastic decoding can still occasionally emit a
-    plain-text claim that it called the tool.  Treat that as a retryable serving failure instead of a successful
-    assistant answer.  Named choices also verify the selected function name.
-    """
-    choice = req.get("tool_choice")
-    required = choice == "required"
-    named = None
-    if isinstance(choice, dict) and choice.get("type") == "function":
-        fn = choice.get("function") if isinstance(choice.get("function"), dict) else {}
-        named = fn.get("name")
-    if not required and not named:
-        return None
-    try:
-        calls = response["choices"][0]["message"].get("tool_calls") or []
-    except (KeyError, IndexError, TypeError):
-        calls = []
-    if not calls:
-        target = f" {named!r}" if named else ""
-        return f"tool_choice requires a function call{target}, but the model returned no tool call; retry the request"
-    if named:
-        got = [((c.get("function") or {}).get("name")) for c in calls if isinstance(c, dict)]
-        if named not in got:
-            return f"tool_choice requires function {named!r}, but the model called {got!r}; retry the request"
-    return None
-
-
 # ------------------------------------------------------------------------------------------------ Anthropic
 def anthropic_events(svc: Service, req: dict, ids, thinking, tools, max_new, cancel):
     mid = "msg_" + uuid.uuid4().hex[:24]
@@ -1295,24 +1266,8 @@ def make_handler(svc: Service):
             run = run_with_mcp(svc, svc.mcp, messages, tools, kw, ids, thinking, max_new, max_req, req, cancel,
                                {t["name"] for t in extra}) if use_mcp else None
             chunks = openai_chunks(svc, req, ids, thinking, tools, max_new, cancel, run=run)
-            forced_choice = req.get("tool_choice") == "required" or (
-                isinstance(req.get("tool_choice"), dict) and req.get("tool_choice", {}).get("type") == "function"
-            )
             if not req.get("stream"):
-                response = openai_collect(chunks)
-                forced_error = _forced_tool_error(req, response)
-                if forced_error:
-                    return self._json(503, {"error": {"type": "server_error", "message": forced_error}})
-                return self._json(200, response)
-            # For a forced tool choice, do not leak a stochastic plain-text false-success to the client before we
-            # know a real tool call was produced.  Buffer this short generation, validate it, then replay the same
-            # SSE chunks.  Auto tool use keeps the normal low-latency streaming path.
-            if forced_choice:
-                buffered = list(chunks)
-                forced_error = _forced_tool_error(req, openai_collect(iter(buffered)))
-                if forced_error:
-                    return self._json(503, {"error": {"type": "server_error", "message": forced_error}})
-                chunks = iter(buffered)
+                return self._json(200, openai_collect(chunks))
             self._sse()
             try:
                 for c in chunks:

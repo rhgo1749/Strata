@@ -3423,12 +3423,6 @@ int main(int argc, char** argv) {
                 continue;
             }
             const int64_t n = (int64_t) ids.size();
-            const int64_t req_cache_hits0 = drive.d.cache_hits;
-            const int64_t req_cache_admitted0 = drive.d.cache_admitted;
-            const int64_t req_cache_refused0 = drive.d.cache_refused;
-            const int64_t req_pcie_experts0 = drive.d.pcie_experts;
-            const int64_t req_pool_calls0 = drive.calls;
-            const double req_pool_cpu_ms0 = drive.cpu_ms;
             req_imgs.clear();
             if (geni && !o.vision) { std::printf("ERR this engine was started without --vision\n"); continue; }
             if (geni || !mrope_identity) {
@@ -4013,22 +4007,6 @@ int main(int argc, char** argv) {
                          prompt_ms > 0 ? 1000.0 * fresh / prompt_ms : 0.0, (long long) produced_n, decode_ms,
                          decode_ms > 0 ? 1000.0 * produced_n / decode_ms : 0.0, (long long) draft_accepted,
                          (long long) draft_offered, checks.size(), cancelled ? " (cancelled)" : "");
-            {
-                const int64_t hits = drive.d.cache_hits - req_cache_hits0;
-                const int64_t admitted = drive.d.cache_admitted - req_cache_admitted0;
-                const int64_t refused = drive.d.cache_refused - req_cache_refused0;
-                const int64_t lookups = hits + admitted + refused;
-                const int64_t calls = drive.calls - req_pool_calls0;
-                const double positions = g.n_layers > 0 ? (double) calls / (double) g.n_layers : 0.0;
-                const double pool_ms = drive.cpu_ms - req_pool_cpu_ms0;
-                const int64_t pcie_experts = drive.d.pcie_experts - req_pcie_experts0;
-                std::fprintf(stderr,
-                             "strata serve: expert request: cache %.2f%% (%lld/%lld hits, %lld admitted, %lld refused), "
-                             "CPU pool %.2f ms/token over %.0f positions, PCIe %lld experts\n",
-                             lookups > 0 ? 100.0 * (double) hits / (double) lookups : 0.0,
-                             (long long) hits, (long long) lookups, (long long) admitted, (long long) refused,
-                             positions > 0.0 ? pool_ms / positions : 0.0, positions, (long long) pcie_experts);
-            }
             // the VRAM share of the experts the pool looked up while decoding; experts it sent over PCIe for the GPU
             // to read (--pcie-frac) are in neither count
             if (req_look > 0) {
