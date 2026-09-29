@@ -38,7 +38,8 @@ class ChatTemplate:
         env = ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True, extensions=["jinja2.ext.loopcontrols"])
         env.filters["tojson"] = tojson
         env.globals["raise_exception"] = raise_exception
-        self.template = env.from_string(Path(path).read_text(encoding="utf-8"))
+        self.source = Path(path).read_text(encoding="utf-8")
+        self.template = env.from_string(self.source)
 
     def render(self, messages: list[dict], tools: list[dict] | None = None, add_generation_prompt: bool = True,
                **kwargs) -> str:
@@ -144,7 +145,7 @@ def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
         role = m.get("role")
         if role == "developer":
             role = "system"
-        out = {"role": role, "content": _parts_of(m.get("content")) if role == "user" else _text_of(m.get("content"))}
+        out = {"role": role, "content": _parts_of(m.get("content")) if role in ("user", "tool", "assistant") else _text_of(m.get("content"))}
         if m.get("reasoning_content"):
             out["reasoning_content"] = m["reasoning_content"]
         if m.get("tool_calls"):
@@ -160,10 +161,7 @@ def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
     tools = [t.get("function", t) if isinstance(t, dict) and t.get("type") == "function" else t
              for t in req.get("tools") or []] or None
 
-    # OpenAI tool_choice compatibility.  The chat template only knows whether tools are present, so normalize the
-    # request here instead of teaching the model about an API-specific field.  "none" must actually hide the tools;
-    # a named function narrows the visible set to that function; "required" keeps the set and adds a short system
-    # constraint.  "auto" (and an absent field) preserves the model's normal choice.
+    # OpenAI tool_choice compatibility.  Normalize the API-specific field before rendering the chat template.
     choice = req.get("tool_choice")
     forced = None
     if choice is None or choice == "auto":
@@ -285,8 +283,6 @@ def parse_tool_call(body: str, schema: dict | None = None) -> ToolCall:
     while "<parameter=" in rest:
         rest = rest[rest.index("<parameter=") + len("<parameter="):]
         tag_end = rest.find(">")
-        # A generation can be cut immediately after `<parameter=name`.  Treat that trailing fragment as absent
-        # instead of letting str.index() turn one malformed model token sequence into a 500/server-stream error.
         if tag_end < 0:
             break
         pname = rest[:tag_end]
@@ -499,8 +495,6 @@ class OutputParser:
                 stripped = body.strip()
                 header_end = stripped.find(">")
                 if not stripped.startswith("<function=") or header_end < 0:
-                    # No valid function header was ever established.  Do not fail the whole request; expose the
-                    # malformed model text as ordinary content so a client can see/retry it without executing it.
                     out.append(Event("content", CALL_START + body + CALL_END))
                 else:
                     name = stripped[len("<function="):header_end]

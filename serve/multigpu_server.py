@@ -61,6 +61,29 @@ def replace_option(args: list[str], name: str, value: int | str) -> list[str]:
     return out
 
 
+def remove_option(args: list[str], name: str) -> list[str]:
+    """Remove every `name value` pair; malformed trailing occurrences are removed too."""
+    out: list[str] = []
+    i = 0
+    while i < len(args):
+        if args[i] == name:
+            i += 2 if i + 1 < len(args) else 1
+            continue
+        out.append(args[i])
+        i += 1
+    return out
+
+
+def sanitize_lane_config(cfg: dict) -> dict:
+    """Return a lane-local config that cannot re-expand itself into upstream layer-split mode."""
+    lane_cfg = copy.deepcopy(cfg)
+    lane_cfg.pop("gpu", None)
+    lane_cfg.pop("layer_split", None)
+    if isinstance(lane_cfg.get("args"), list):
+        lane_cfg["args"] = remove_option(lane_cfg["args"], "--layer-split")
+    return lane_cfg
+
+
 def resolve_config_path(value: str, cwd: str | None) -> Path:
     p = Path(value).expanduser()
     if not p.is_absolute():
@@ -183,7 +206,6 @@ def partition_cpu_sets_exact(core_groups: list[tuple[int, ...]], counts: list[in
         )
     out: list[list[int]] = [[] for _ in counts]
     assigned = [0] * len(counts)
-    # Smooth weighted round-robin: exact counts over one full pass, interleaved across the socket/CCDs.
     credit = [0] * len(counts)
     total = sum(counts)
     for group in core_groups:
@@ -229,12 +251,14 @@ class Lane:
     pcie_frac: float | None = None
     kv_resident: int | None = None
     process: subprocess.Popen | None = None
+    busy: bool = False
 
 
 class LanePool:
     def __init__(self, lanes: list[Lane]):
         self.lanes = lanes
         self.free: queue.Queue[Lane] = queue.Queue()
+        self.lock = threading.Lock()
         for lane in lanes:
             self.free.put(lane)
 
@@ -247,9 +271,13 @@ class LanePool:
             except queue.Empty:
                 continue
             if lane.process is not None and lane.process.poll() is None:
+                with self.lock:
+                    lane.busy = True
                 return lane
 
     def release(self, lane: Lane) -> None:
+        with self.lock:
+            lane.busy = False
         if lane.process is not None and lane.process.poll() is None:
             self.free.put(lane)
 
@@ -265,6 +293,7 @@ class LanePool:
                 "kv_resident": x.kv_resident,
                 "pid": x.process.pid if x.process else None,
                 "alive": bool(x.process and x.process.poll() is None),
+                "busy": x.busy,
             }
             for x in self.lanes
         ]
@@ -300,32 +329,40 @@ def stop_lane(lane: Lane) -> None:
         p.wait(timeout=5)
 
 
-def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int, kv_budget: int | None):
+def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int, kv_budget: int | None,
+                 reject_generate_proxy: bool = False):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
         def log_message(self, fmt, *args):
             print("[strata-multigpu] " + (fmt % args), flush=True)
 
-        def _status(self):
-            body = json.dumps(
-                {
-                    "status": "ok",
-                    "mode": "partitioned-multigpu-v1",
-                    "arena_file": str(arena_file),
-                    "arena_bytes": arena_bytes,
-                    "kv_budget": kv_budget,
-                    "lane_context_total": sum(x.context for x in pool.lanes),
-                    "lanes": pool.status(),
-                },
-                indent=1,
-            ).encode()
-            self.send_response(200)
+        def _json(self, status: int, value) -> None:
+            body = json.dumps(value).encode()
+            self.send_response(status)
             self.send_header("content-type", "application/json")
             self.send_header("content-length", str(len(body)))
             self.end_headers()
             if self.command != "HEAD":
                 self.wfile.write(body)
+
+        def _status(self):
+            self._json(200, {
+                "status": "ok",
+                "mode": "partitioned-multigpu-v1",
+                "arena_file": str(arena_file),
+                "arena_bytes": arena_bytes,
+                "kv_budget": kv_budget,
+                "lane_context_total": sum(x.context for x in pool.lanes),
+                "lanes": pool.status(),
+            })
+
+        def _slots(self):
+            self._json(200, [
+                {"id": lane.index, "n_ctx": lane.context,
+                 "is_processing": lane.busy, "gpu": lane.gpu}
+                for lane in pool.lanes if lane.process is not None and lane.process.poll() is None
+            ])
 
         def _body(self) -> bytes:
             if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
@@ -337,13 +374,7 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
             try:
                 body = self._body()
             except ValueError as e:
-                data = json.dumps({"error": {"message": str(e)}}).encode()
-                self.send_response(411)
-                self.send_header("content-type", "application/json")
-                self.send_header("content-length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
-                return
+                return self._json(411, {"error": {"message": str(e)}})
 
             headers = {
                 k: v for k, v in self.headers.items()
@@ -368,8 +399,6 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                 self.end_headers()
                 if self.command != "HEAD":
                     while True:
-                        # read1() is deliberate: HTTPResponse.read(N) may wait for N bytes across
-                        # many chunked SSE frames, which would turn streaming into large buffered bursts.
                         chunk = resp.read1(64 * 1024)
                         if not chunk:
                             break
@@ -385,29 +414,21 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                 conn.close()
 
         def _dispatch(self):
-            if self.path.split("?", 1)[0] == "/__multigpu/status":
-                return self._status()
             path = self.path.split("?", 1)[0]
+            if path == "/__multigpu/status":
+                return self._status()
+            if path == "/slots" and self.command in ("GET", "HEAD"):
+                return self._slots()
+            if reject_generate_proxy and path in GENERATE_PATHS and self.command == "POST":
+                return self._json(503, {"error": {"message": "benchmark isolation: public generation disabled"}})
             leased = path in GENERATE_PATHS and self.command == "POST"
             try:
                 lane = pool.acquire() if leased else lane0
             except RuntimeError as e:
-                data = json.dumps({"error": {"message": str(e)}}).encode()
-                self.send_response(503)
-                self.send_header("content-type", "application/json")
-                self.send_header("content-length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
-                return
+                return self._json(503, {"error": {"message": str(e)}})
             try:
                 if lane.process is None or lane.process.poll() is not None:
-                    data = json.dumps({"error": {"message": f"GPU lane {lane.index} is not running"}}).encode()
-                    self.send_response(503)
-                    self.send_header("content-type", "application/json")
-                    self.send_header("content-length", str(len(data)))
-                    self.end_headers()
-                    self.wfile.write(data)
-                    return
+                    return self._json(503, {"error": {"message": f"GPU lane {lane.index} is not running"}})
                 self._proxy(lane)
             finally:
                 if leased:
@@ -425,9 +446,6 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
 
 
 def main() -> int:
-    # tmux kill-session closes the pane with SIGHUP; systemd/service managers normally use SIGTERM.  Python's
-    # default action exits immediately, skipping the finally block below and orphaning the lane engines (and
-    # their VRAM).  Convert both into the same controlled path as Ctrl-C so every child is terminated first.
     def _shutdown_signal(_signum, _frame):
         raise KeyboardInterrupt
 
@@ -456,6 +474,10 @@ def main() -> int:
                     help="per-lane --pcie-frac values, e.g. 0.55,0.30,0.55")
     ap.add_argument("--lane-kv-residents",
                     help="per-lane --kv-resident token counts, e.g. 65536,32768,32768")
+    ap.add_argument("--private-arena", action="store_true",
+                    help="benchmark only: use the normal private expert arena in each lane")
+    ap.add_argument("--reject-generate-proxy", action="store_true",
+                    help="benchmark only: reject generation on the supervisor proxy; private lanes still work")
     a = ap.parse_args()
 
     if os.name == "nt":
@@ -530,7 +552,7 @@ def main() -> int:
 
     lanes: list[Lane] = []
     for i, (gpu, ctx) in enumerate(zip(gpus, contexts)):
-        lane_cfg = copy.deepcopy(cfg)
+        lane_cfg = sanitize_lane_config(cfg)
         lane_cfg["args"] = replace_option(lane_cfg["args"], "--max-context", ctx)
         if pcie_fracs[i] is not None:
             lane_cfg["args"] = replace_option(lane_cfg["args"], "--pcie-frac", pcie_fracs[i])
@@ -571,15 +593,17 @@ def main() -> int:
             flush=True,
         )
 
-    # Start sequentially.  ArenaExpertSource currently populates the shared mapping itself, so overlapping
-    # initial loads would race on the same bytes.  No public request can arrive until all lanes are ready.
     started: list[Lane] = []
     try:
         for lane in lanes:
             env = dict(os.environ)
             env["CUDA_VISIBLE_DEVICES"] = lane.gpu
-            env["STRATA_SHARED_ARENA_FILE"] = str(arena_file)
-            env["STRATA_SHARED_ARENA_BYTES"] = str(spec.bytes)
+            if a.private_arena:
+                env.pop("STRATA_SHARED_ARENA_FILE", None)
+                env.pop("STRATA_SHARED_ARENA_BYTES", None)
+            else:
+                env["STRATA_SHARED_ARENA_FILE"] = str(arena_file)
+                env["STRATA_SHARED_ARENA_BYTES"] = str(spec.bytes)
             cmd = [
                 sys.executable, str(ROOT / "serve" / "server.py"),
                 "--engine", "strata",
@@ -601,7 +625,10 @@ def main() -> int:
             print(f"[strata-multigpu] lane {lane.index} ready", flush=True)
 
         pool = LanePool(lanes)
-        httpd = ThreadingHTTPServer((a.host, a.port), make_handler(pool, lanes[0], arena_file, spec.bytes, a.kv_budget))
+        httpd = ThreadingHTTPServer(
+            (a.host, a.port),
+            make_handler(pool, lanes[0], arena_file, spec.bytes, a.kv_budget, a.reject_generate_proxy),
+        )
         print(
             f"[strata-multigpu] ready: http://{a.host}:{a.port}/v1 "
             f"({len(lanes)} concurrent generation lanes)",

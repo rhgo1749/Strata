@@ -303,9 +303,17 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
     pt("begin");
     d.src->begin_layer(d.layers, ids, n_tok * k);
     pt("begun");
-    if (!d.usage.empty())
-        for (int64_t i = 0; i < n_tok * k; ++i)
-            if (ids[i] >= 0 && ids[i] < d.n_expert) d.usage[(size_t) d.layers * (size_t) d.n_expert + (size_t) ids[i]] += 1.0f;
+    if (!d.usage.empty()) {
+        const uint64_t trace_now = d.first_miss_ns.empty() ? 0 : (uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        for (int64_t i = 0; i < n_tok * k; ++i) {
+            if (ids[i] < 0 || ids[i] >= d.n_expert) continue;
+            const size_t ri = (size_t) d.layers * (size_t) d.n_expert + (size_t) ids[i];
+            if (trace_now && d.host_res != nullptr && d.host_res[ri] < 0 && d.first_miss_ns[ri] == 0)
+                d.first_miss_ns[ri] = trace_now;
+            d.usage[ri] += 1.0f;
+        }
+    }
     // ---- plan v0.3 P6: the GPU's share, decided and published FIRST so the GPU starts while the CPU works.
     // Distinct experts in routing order; resident ones and the last pcie_num/256 of the missed ones go to the GPU.
     const int64_t n = n_tok * k;
@@ -335,9 +343,22 @@ void expert_pool_dispatch_multi(ExpertDispatch& d, const float* x_f, const int32
             int kd = -1;
             unsigned long long ptr = 0;
             if (e >= 0 && e < d.n_expert) {
-                const int32_t slot = d.host_res[(size_t) d.layers * (size_t) d.n_expert + (size_t) e];
+                const size_t ri = (size_t) d.layers * (size_t) d.n_expert + (size_t) e;
+                const int32_t slot = d.host_res[ri];
                 if (slot >= 0) {
                     kd = 0;
+                    if (!d.first_resident_ns.empty() && d.first_resident_ns[ri] != 0 && !d.traced_hit_reported[ri]) {
+                        const uint64_t now = (uint64_t) std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count();
+                        const uint64_t miss = d.first_miss_ns[ri];
+                        std::fprintf(stderr,
+                                     "ADAPT_TRACE gpu_hit layer=%lld expert=%d slot=%d resident_to_hit_us=%.3f miss_to_hit_us=%.3f\n",
+                                     (long long) d.layers, (int) e, (int) slot,
+                                     (double) (now - d.first_resident_ns[ri]) / 1000.0,
+                                     miss ? (double) (now - miss) / 1000.0 : -1.0);
+                        std::fflush(stderr);
+                        d.traced_hit_reported[ri] = 1;
+                    }
                     ptr = (unsigned long long) (d.cache_base + (d.cache_slot_off ? (size_t) d.cache_slot_off[slot]
                                                                                  : (size_t) slot * (size_t) d.cache_blob));
                 } else {
@@ -653,6 +674,8 @@ LoadStats load_experts_gguf(const std::string& gguf, uint8_t* dst, const strata:
     for (auto& t : pool) t.join();
     if (bad) {
         st.seconds = -1.0;
+        st.ok = false;
+        st.error = "short read or unreadable shard while reading the experts from the GGUF";
         return st;
     }
     st.bytes = lay.total;
@@ -712,6 +735,11 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
     }
     const LoadStats st = from_gguf ? load_experts_gguf(gguf_, a->data(), lay, threads)
                                    : load_experts_ranges(path, a->data(), loff, lbytes, threads, /*chunk=*/8u << 20);
+    if (!st.ok) {
+        delete a;
+        err = "ArenaExpertSource: the expert load was refused: " + (st.error.empty() ? std::string("unknown") : st.error);
+        return false;
+    }
     if (st.bytes != want) {
         delete a;
         err = "ArenaExpertSource: the load read " + std::to_string(st.bytes) + " B of " + std::to_string(want);
@@ -740,6 +768,9 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
     reads_ = 0;
     note_ = a->note;
     gib_per_s_ = st.gib_per_second();
+    load_seconds_ = st.seconds;
+    load_read_s_ = st.read_seconds;
+    load_copy_s_ = st.copy_seconds;
     return true;
 }
 

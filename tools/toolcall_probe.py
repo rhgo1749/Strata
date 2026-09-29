@@ -172,7 +172,7 @@ def main() -> int:
                     passed += int(ok)
                     print(f"{case.name:10s} run={run} {'PASS' if ok else 'FAIL'} {dt:5.2f}s "
                           f"finish={choice.get('finish_reason')} {detail if not ok else ''}")
-                except Exception as e:  # probe must report transport/server/parser failures instead of stopping
+                except Exception as e:
                     total_fail += 1
                     print(f"{case.name:10s} run={run} ERROR {type(e).__name__}: {e}")
         expected = a.runs * len(CASES)

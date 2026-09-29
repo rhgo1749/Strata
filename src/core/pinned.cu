@@ -29,9 +29,6 @@ inline bool requested_for(size_t bytes) {
 inline void* mmap_compat(void* addr, size_t bytes, int prot, int flags, int fd, off_t off) {
     if (!requested_for(bytes)) return ::mmap(addr, bytes, prot, flags, fd, off);
 
-    // Upstream reserve() first probes hugetlb.  Fail that probe deliberately so it follows
-    // its normal 4 KiB fallback and keeps PageBacking/note semantics correct; the fallback
-    // anonymous mapping below is the one replaced by the shared file mapping.
     if ((flags & MAP_HUGETLB) != 0) {
         errno = ENOMEM;
         return MAP_FAILED;

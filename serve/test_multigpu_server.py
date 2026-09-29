@@ -21,11 +21,28 @@ class MultiGpuPlanningTests(unittest.TestCase):
             M.replace_option(args, "--max-context", 262144),
             ["--pack", "/m", "--max-context", "262144", "--kv", "int8"],
         )
-        self.assertEqual(args[3], "131072")  # input is not mutated
+        self.assertEqual(args[3], "131072")
 
     def test_replace_missing_option(self):
         self.assertEqual(M.replace_option(["--pack", "/m"], "--max-context", 65536),
                          ["--pack", "/m", "--max-context", "65536"])
+
+    def test_remove_option_removes_all_layer_split_pairs(self):
+        self.assertEqual(
+            M.remove_option(["--pack", "/m", "--layer-split", "auto", "--kv", "int8",
+                             "--layer-split", "16,32"], "--layer-split"),
+            ["--pack", "/m", "--kv", "int8"],
+        )
+
+    def test_lane_config_cannot_reexpand_into_layer_split(self):
+        cfg = {"gpu": [0, 1, 2], "layer_split": "16,32",
+               "args": ["--pack", "/m", "--layer-split", "auto", "--max-context", "262144"]}
+        got = M.sanitize_lane_config(cfg)
+        self.assertNotIn("gpu", got)
+        self.assertNotIn("layer_split", got)
+        self.assertNotIn("--layer-split", got["args"])
+        self.assertIn("gpu", cfg)
+        self.assertIn("--layer-split", cfg["args"])
 
     def test_native_arena_size_matches_arena_expert_source_contract(self):
         with tempfile.TemporaryDirectory() as td:
