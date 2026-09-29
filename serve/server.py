@@ -24,6 +24,7 @@ import argparse
 import collections
 import base64
 import hashlib
+import codecs
 import json
 import os
 import queue
@@ -515,13 +516,19 @@ class ByteTokenizer:
 
 # ------------------------------------------------------------------------------------------------ core
 class Detokenizer:
-    """Incremental decode: re-decode the generated ids and emit only the new, complete suffix (a multi-byte
-    character split across tokens is held until complete)."""
+    """Incremental decode: each token's bytes go through an incremental UTF-8 decoder, which emits the complete
+    characters and holds a multi-byte character split across tokens until it is complete (invalid bytes become
+    U+FFFD, as a whole decode with errors="replace" makes them).  Constant time per token - the old re-decode of
+    every generated id cost 2 ms per token after 8K tokens and 4 ms after 16K (perf-review F-1).  A tokenizer
+    without `token_bytes` (the tests' byte tokenizer) keeps the re-decode."""
 
     def __init__(self, tok):
         self.tok, self.ids, self.sent = tok, [], 0
+        self.inc = codecs.getincrementaldecoder("utf-8")(errors="replace") if hasattr(tok, "token_bytes") else None
 
     def push(self, t: int) -> str:
+        if self.inc is not None:
+            return self.inc.decode(self.tok.token_bytes(t))
         self.ids.append(t)
         text = self.tok.decode(self.ids)
         if text.endswith("�"):
@@ -592,7 +599,8 @@ class Service:
         if getattr(self, "telemetry", None) is None:
             from serve.telemetry import Telemetry
             self.telemetry = Telemetry(extra=lambda: {"tok_s": self._tok_s()},
-                                       gpu_index=int(getattr(self, "gpu_index", 0) or 0))
+                                       gpu_index=int(getattr(self, "gpu_index", 0) or 0),
+                                       gpu_indices=getattr(self, "gpu_indices", None))
 
     def _tok_s(self):
         with self.status_lock:
@@ -1550,6 +1558,7 @@ def main() -> int:
                   fit_max_tokens=a.fit_max_tokens or cfg.get("fit_max_tokens") is True)
     svc.api_key = a.api_key or cfg.get("api_key", "")
     svc.gpu_index = (gpu_list(cfg) or [0])[0]           # the Monitor reads the card the engine runs on (issue #51)
+    svc.gpu_indices = gpu_list(cfg)                     # ... or every card of a layer split (issue #112)
     if a.config:                                        # the Chat settings shared with other apps, from last time
         svc.shared_path = str(Path(a.config).with_suffix("")) + ".shared-settings.json"
         try:

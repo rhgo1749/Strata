@@ -12,14 +12,41 @@ needed; cards on x4 or x1 slots work, and the PCIe share of each card is probed 
 
 ## Using it
 
-At setup time (Windows: `START-HERE.bat`, Linux: `./setup.sh`):
+**Nothing to type.** `START-HERE.bat` (Linux: `./setup.sh`) lists your NVIDIA cards and says for each one whether
+Strata can use it:
 
 ```
---gpus 0,2                 the cards, as nvidia-smi numbers them; the first is the main one
+  Your NVIDIA GPUs:
+    GPU 0: NVIDIA GeForce RTX 5080, 16 GB VRAM - can be used
+    GPU 1: NVIDIA GeForce RTX 2080 Ti, 22 GB VRAM - not supported - older than the RTX 30 series (compute capability 7.5; Strata needs 8.0 or newer)
+    GPU 2: NVIDIA GeForce RTX 3090, 24 GB VRAM - can be used
+  ...
+  1) GPU 0 (NVIDIA GeForce RTX 5080, 16 GB) + GPU 2 (NVIDIA GeForce RTX 3090, 24 GB) together   (recommended)
+  2) GPU 2 (NVIDIA GeForce RTX 3090, 24 GB) only
+  3) GPU 0 (NVIDIA GeForce RTX 5080, 16 GB) only
+Which GPUs? [1]:
+```
+
+When two or more cards can share the model, the two best together are recommended (the newest generation first:
+it becomes the main card). A model installed on one card asks once, at its next start, whether to use both from
+now on; the answer is kept.
+
+**Choosing yourself** (at setup or at any start):
+
+```
+--gpus 0,2                 these cards together, as nvidia-smi numbers them; the first is the main one. Remembered.
+--gpus all                 every card that can share the model
+--gpu 0                    one card (at a start: for that start only)
 --layer-split auto         (default) or the first layer of each later card, e.g. 18 or 16,32
 ```
 
-or in an existing config (`strata-*.json`), then restart:
+**Not supported** (setup says so and names the cards that can be used instead):
+- a card older than the RTX 30 series (compute capability below 8.0: RTX 20, GTX 16/10);
+- a card with less than 8 GB of VRAM, together with others (each card holds a copy of the dense weights and its
+  own prompt buffers);
+- AMD and Intel GPUs, and a mix of NVIDIA with them.
+
+Or edit an existing config (`strata-*.json`), then restart:
 
 ```json
 "gpu": [0, 2],
@@ -52,11 +79,21 @@ into the card that owns the layer.
 
 ## Limits (for now)
 
-- Not with images (`--vision`), control vectors / the speed projection, KV streaming (`--kv-resident`), the older
-  helper-GPU experiment (`--expert-cache-remote`, docs/SECOND_GPU.md) or `--mmap-experts`.
+- **Works across cards** (bench/results/2026-09-29-layer-split-limits):
+  - images (`--vision`): each card keeps its own image-position table;
+  - control vectors and the experimental speed projection: each card holds the vector's tables, switched on and
+    off per request on all of them;
+  - KV streaming (`--kv-resident`): each card streams the KV of its own session;
+  - mid-prompt checkpoints (`--prompt-cache-every`): each card saves its part of a checkpoint when it has read that
+    chunk;
+  - the older helper-GPU caches (`--expert-cache-remote`, docs/SECOND_GPU.md): they take the visible GPUs no stage
+    runs on, and hold only experts no stage's cache holds. On the test rig, a 2080 Ti helper made decoding slower,
+    as it did without a split: its per-layer round trip costs more than the CPU pool needs for those experts.
+- `--mmap-experts` needs a canonical pack (`experts.bin`), with or without a split; a native (IQ) pack says so at
+  start.
 - The prompt path has its own buffers on every card (1.5 GB each at the default 2048-token chunk; `--prefill 1024`
-  halves that) instead of borrowing cache slots as one card does.
-- Mid-prompt checkpoints (`--prompt-cache-every`) are off; the ones at turn boundaries - what a chat reuses - stay.
+  halves that) instead of borrowing cache slots as one card does. An explicit `--expert-cache` on the first card is
+  capped to leave room for them.
 - On Windows only 8 GiB of the expert arena is pinned (more, mapped into two GPU contexts, leaves WDDM refusing
   allocations); the PCIe share covers those layers.
 - Every card needs compute capability 8.0 (RTX 30 or newer). A Turing card (RTX 20, sm_75) builds only with the
