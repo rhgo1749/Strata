@@ -49,6 +49,8 @@ Mixed-performance GPUs are valid because one request is leased to one lane and t
 
 A slower GPU therefore affects the request assigned to that lane rather than directly setting the token rate of every other lane. Each GPU still needs enough VRAM for its own dense/QSA/MTP state, hot-expert tier, CUDA state and configured resident-KV window.
 
+The reference host now has a controlled mixed-GPU check for this exact property: an RTX 5070 Ti x8 measured **70.336 tok/s alone and 70.321 tok/s while an RTX 5060 Ti x4 concurrently served at 57.246 tok/s**. Conditions, variance, and caveats are recorded in the recipe's [`systems-ablation-20260929.md`](https://github.com/rhgo1749/qwen3.8-flash-next-strata-gpu-per-lane-recipe/blob/main/docs/systems-ablation-20260929.md). Treat that as measured evidence for this topology, not a universal no-contention guarantee.
+
 Start by proving that **each GPU works as a normal single-GPU Strata configuration** before enabling the multi-lane supervisor.
 
 ### CPU guidance
