@@ -159,6 +159,36 @@ def openai_to_messages(req: dict) -> tuple[list[dict], list[dict] | None, dict]:
         messages.append(out)
     tools = [t.get("function", t) if isinstance(t, dict) and t.get("type") == "function" else t
              for t in req.get("tools") or []] or None
+
+    # OpenAI tool_choice compatibility.  The chat template only knows whether tools are present, so normalize the
+    # request here instead of teaching the model about an API-specific field.  "none" must actually hide the tools;
+    # a named function narrows the visible set to that function; "required" keeps the set and adds a short system
+    # constraint.  "auto" (and an absent field) preserves the model's normal choice.
+    choice = req.get("tool_choice")
+    forced = None
+    if choice is None or choice == "auto":
+        pass
+    elif choice == "none":
+        tools = None
+    elif choice == "required":
+        if not tools:
+            raise ValueError("tool_choice='required' needs at least one tool")
+        forced = "You MUST call at least one of the provided functions before answering."
+    elif isinstance(choice, dict) and choice.get("type") == "function":
+        fn = choice.get("function") if isinstance(choice.get("function"), dict) else {}
+        name = fn.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError("tool_choice function is missing a name")
+        matched = [t for t in tools or [] if isinstance(t, dict) and t.get("name") == name]
+        if not matched:
+            raise ValueError(f"tool_choice requested unknown function {name!r}")
+        tools = matched
+        forced = f"You MUST call the provided function {name} before answering."
+    else:
+        raise ValueError("tool_choice must be 'auto', 'none', 'required', or a function selection")
+    if forced:
+        messages.insert(0, {"role": "system", "content": forced})
+
     kwargs = {}
     # OpenAI Chat Completions: "reasoning_effort"; Responses style: "reasoning": {"effort": ...}
     reasoning = req.get("reasoning") if isinstance(req.get("reasoning"), dict) else {}
@@ -254,8 +284,13 @@ def parse_tool_call(body: str, schema: dict | None = None) -> ToolCall:
     args = {}
     while "<parameter=" in rest:
         rest = rest[rest.index("<parameter=") + len("<parameter="):]
-        pname = rest[:rest.index(">")]
-        rest = rest[rest.index(">") + 1:]
+        tag_end = rest.find(">")
+        # A generation can be cut immediately after `<parameter=name`.  Treat that trailing fragment as absent
+        # instead of letting str.index() turn one malformed model token sequence into a 500/server-stream error.
+        if tag_end < 0:
+            break
+        pname = rest[:tag_end]
+        rest = rest[tag_end + 1:]
         end = rest.find("</parameter>")
         value = rest[:end] if end >= 0 else rest
         rest = rest[end + len("</parameter>"):] if end >= 0 else ""
@@ -461,11 +496,18 @@ class OutputParser:
                     return out
                 body = self.buf[:i]
                 self.buf = self.buf[i + len(CALL_END):]
-                name = body.strip()[len("<function="):].split(">", 1)[0]
-                call = parse_tool_call(body, self.schemas.get(name))
-                if self.scall is not None:
-                    call.id = self.scall.id
-                out.append(Event("tool_call", call=call))
+                stripped = body.strip()
+                header_end = stripped.find(">")
+                if not stripped.startswith("<function=") or header_end < 0:
+                    # No valid function header was ever established.  Do not fail the whole request; expose the
+                    # malformed model text as ordinary content so a client can see/retry it without executing it.
+                    out.append(Event("content", CALL_START + body + CALL_END))
+                else:
+                    name = stripped[len("<function="):header_end]
+                    call = parse_tool_call(body, self.schemas.get(name))
+                    if self.scall is not None:
+                        call.id = self.scall.id
+                    out.append(Event("tool_call", call=call))
                 self._reset_scan()
                 self.state, self.lead = "content", True
 
