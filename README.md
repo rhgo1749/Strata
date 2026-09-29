@@ -55,6 +55,35 @@ flowchart TB
 
 The multi-GPU runtime is **not hard-coded for one GPU count, one PCIe topology, or one reference machine**. Serving parameters are selected at launch and comma-separated per-lane options are validated against the number of GPUs.
 
+A practical sizing rule is simple: **every selected GPU must first be able to run one usable single-GPU Strata lane, and the host must have enough RAM, CPU and PCIe capacity for all lanes concurrently.**
+
+| Component | Practical starting point | Recommended for multi-lane use | Validated reference host |
+| --- | --- | --- | --- |
+| OS | Linux | Current 64-bit Linux | Ubuntu Linux |
+| GPU count | 2 NVIDIA GPUs | 2–4 GPUs | 3 GPUs |
+| VRAM per GPU | Enough for the selected single-GPU Strata configuration; upstream Strata starts at 12 GB for supported model sizes | **16 GB+ per GPU** for more hot-cache/KV headroom | 3 × RTX 5070 Ti 16 GB |
+| System RAM | One shared expert arena + every lane's host-KV + OS/runtime headroom | Size from the actual quant/context plan; **128 GB is the validated recommendation for the 3-lane 262K ×3 IQ3_XXS reference configuration** | 128 GB |
+| CPU | Current automatic partitioning needs at least 2 physical cores per lane | **4–6 physical cores per active lane** is a useful starting target | Ryzen 9 9950X3D 16C/32T, split 5 / 6 / 5 |
+| PCIe | Stable usable link for each GPU | Prefer wider links where available; tune asymmetric lanes from measurements | Gen5 x8 / x4 / x8 |
+| Storage | SSD | NVMe SSD | NVMe |
+| NVLink | Not required | Not required | None |
+| PSU / cooling | Must sustain the selected CPU and GPUs together | Leave normal electrical and thermal headroom for simultaneous multi-GPU load | Host-specific |
+
+These are **guidelines, not universal minimums**. Smaller quants, fewer lanes or shorter contexts can require less RAM; more lanes, larger contexts or a larger model can require more.
+
+RAM should be thought of as:
+
+```text
+required host RAM ≈
+    one shared expert arena
+  + lane 0 host-KV
+  + lane 1 host-KV
+  + ...
+  + OS / server / filesystem-cache headroom
+```
+
+Do **not** multiply the large expert arena by the GPU count: that is the part this fork physically shares. See [`docs/multigpu-hardware-guide.md`](docs/multigpu-hardware-guide.md) for the full sizing rationale and bring-up checklist.
+
 | Option | What it controls |
 | --- | --- |
 | `--gpus` | physical GPU IDs used as independent generation lanes |
@@ -112,9 +141,10 @@ The production multi-GPU path does **not** currently implement tensor parallelis
 For the current contract and future work, see:
 
 - [`docs/multigpu-shared-runtime.md`](docs/multigpu-shared-runtime.md) — implemented multi-GPU runtime contract;
+- [`docs/multigpu-hardware-guide.md`](docs/multigpu-hardware-guide.md) — hardware sizing and bring-up guide;
 - [`docs/multigpu-roadmap.md`](docs/multigpu-roadmap.md) — scheduler/startup improvements and architecture challengers;
 - [`docs/DECISIONS.md`](docs/DECISIONS.md) — architecture decision provenance / Issue-as-ADR policy;
-- [`rhgo1749/strata-gpu-per-lane-serving-recipe`](https://github.com/rhgo1749/strata-gpu-per-lane-serving-recipe) — reference-host configuration, reproducible measurements and tuning examples.
+- [`rhgo1749/qwen3.8-flash-next-strata-gpu-per-lane-recipe`](https://github.com/rhgo1749/qwen3.8-flash-next-strata-gpu-per-lane-recipe) — reference-host configuration, reproducible measurements and tuning examples.
 
 > **Jump to:** [How fast?](#how-fast-is-it) · [Which model?](#which-model-should-i-pick) · [Install](#install) ·
 > [Using it](#using-it) · [Problems?](#something-went-wrong) · [How it works](#how-does-it-work) ·
