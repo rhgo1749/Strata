@@ -172,6 +172,13 @@ A card with more VRAM is faster, because more of the model fits on the GPU: an R
 100-140 tokens per second. All measurements, long-context numbers and estimates for other cards are in the
 [details](docs/DETAILS.md#speed-measured).
 
+Every PC is different: `START-HERE.bat --calibrate` measures a few engine settings on yours and keeps the fastest
+(about 5-10 minutes; on the PC above it made the Coder 7% faster).
+
+**Two or three NVIDIA cards?** `START-HERE.bat --setup --gpus 0,2` splits the model's layers across them (experimental):
+each card keeps the experts of its own layers, and prompts flow through the cards in a pipeline. On an RTX 5080 +
+RTX 3090 it read prompts 18-20% faster than the 5080 alone, with decoding on par. See [docs/MULTI_GPU.md](docs/MULTI_GPU.md).
+
 ## Which model should I pick?
 
 **The size** (the same model, compressed more or less):
@@ -203,6 +210,9 @@ lower the RAM needed.
 
 Not sure? Take **IQ2_XS** - or the **Coder** if you mainly write code, or have 32-48 GB of RAM. You can add another
 one later with `SETUP.bat` (the same as `START-HERE.bat --setup`; on Linux `./setup.sh --setup`).
+
+For **OrcaRouter's Flash-Next Uncensored IQ3_XXS**, see the [manual compatibility setup](docs/ORCA.md).
+It needs an explicit packing conversion and is not an installer menu option.
 
 ## Install
 
