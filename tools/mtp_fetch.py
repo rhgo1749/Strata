@@ -89,20 +89,35 @@ def fetch(out, only):
         if only and only not in r["name"]:
             continue
         path = os.path.join(tdir, r["name"] + ".bin")
-        have = os.path.getsize(path) if os.path.exists(path) else 0
-        with open(path, "ab") as f:
-            pos = r["start"] + have
-            while pos <= r["end"]:
-                end = min(pos + chunk - 1, r["end"])
-                f.write(get(REPO + r["shard"], pos, end))
-                pos = end + 1
-                print("%s %.0f%%" % (r["name"], 100 * (pos - r["start"]) / r["bytes"]), file=sys.stderr)
+        for repair in range(2):
+            have = os.path.getsize(path) if os.path.exists(path) else 0
+            if have > r["bytes"]:
+                print("%s: oversized partial %d > %d; restarting this tensor" %
+                      (r["name"], have, r["bytes"]), file=sys.stderr)
+                with open(path, "wb"):
+                    pass
+                have = 0
+            with open(path, "ab") as f:
+                pos = r["start"] + have
+                while pos <= r["end"]:
+                    end = min(pos + chunk - 1, r["end"])
+                    f.write(get(REPO + r["shard"], pos, end))
+                    pos = end + 1
+                    print("%s %.0f%%" % (r["name"], 100 * (pos - r["start"]) / r["bytes"]), file=sys.stderr)
+            size = os.path.getsize(path)
+            if size == r["bytes"]:
+                break
+            if repair == 0:
+                print("%s: completed size %d != %d; retrying this tensor from scratch" %
+                      (r["name"], size, r["bytes"]), file=sys.stderr)
+                with open(path, "wb"):
+                    pass
+                continue
+            sys.exit("%s: size %d != %d after clean retry" % (path, size, r["bytes"]))
         h = hashlib.sha256()
         with open(path, "rb") as f:
             for block in iter(lambda: f.read(1 << 24), b""):
                 h.update(block)
-        if os.path.getsize(path) != r["bytes"]:
-            sys.exit("%s: size %d != %d" % (path, os.path.getsize(path), r["bytes"]))
         manifest.append(dict(r, file=os.path.relpath(path, out), sha256=h.hexdigest()))
     with open(os.path.join(out, "mtp-manifest.json"), "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=1)

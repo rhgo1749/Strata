@@ -13,8 +13,8 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from serve.frontend import ChatTemplate  # noqa: E402
-from serve.server import CTX_SLACK, ByteTokenizer, EngineDied, MockEngine, Service, serve  # noqa: E402
+from serve.frontend import ChatTemplate, OutputParser, openai_to_messages  # noqa: E402
+from serve.server import CTX_SLACK, ByteTokenizer, EngineDied, MockEngine, Service, _forced_tool_error, serve  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 CTX = 4096
@@ -25,6 +25,117 @@ class RecordingEngine(MockEngine):
     def generate(self, ids, max_new, sampling, cancel, embeddings=None):
         self.last_max_new = max_new
         yield from super().generate(ids, max_new, sampling, cancel, embeddings)
+
+
+class ToolCallCompatibility(unittest.TestCase):
+    TOOLS = [
+        {"type": "function", "function": {"name": "alpha", "description": "A", "parameters": {
+            "type": "object", "properties": {"text": {"type": "string"}, "n": {"type": "integer"}},
+            "required": ["text", "n"]}}},
+        {"type": "function", "function": {"name": "beta", "description": "B", "parameters": {
+            "type": "object", "properties": {"enabled": {"type": "boolean"}}}}},
+    ]
+
+    def req(self, choice):
+        return {"messages": [{"role": "user", "content": "do it"}], "tools": self.TOOLS, "tool_choice": choice}
+
+    def test_tool_choice_none_hides_tools(self):
+        messages, tools, _ = openai_to_messages(self.req("none"))
+        self.assertIsNone(tools)
+        self.assertEqual(messages, [{"role": "user", "content": "do it"}])
+
+    def test_tool_choice_required_adds_constraint(self):
+        messages, tools, _ = openai_to_messages(self.req("required"))
+        self.assertEqual([t["name"] for t in tools], ["alpha", "beta"])
+        self.assertEqual(messages[0]["role"], "system")
+        self.assertIn("MUST call", messages[0]["content"])
+
+    def test_named_tool_choice_filters_visible_tools(self):
+        choice = {"type": "function", "function": {"name": "beta"}}
+        messages, tools, _ = openai_to_messages(self.req(choice))
+        self.assertEqual([t["name"] for t in tools], ["beta"])
+        self.assertIn("beta", messages[0]["content"])
+
+    def test_unknown_named_tool_choice_is_rejected(self):
+        choice = {"type": "function", "function": {"name": "missing"}}
+        with self.assertRaisesRegex(ValueError, "unknown function"):
+            openai_to_messages(self.req(choice))
+
+    def test_streaming_parser_survives_every_character_boundary(self):
+        tools = [{"name": "alpha", "parameters": {"type": "object", "properties": {
+            "text": {"type": "string"}, "n": {"type": "integer"}}}}]
+        raw = ("<tool_call><function=alpha><parameter=text>hello \\\"world\\\"\nsecond line</parameter>"
+               "<parameter=n>7</parameter></function></tool_call>")
+        p = OutputParser(thinking=False, tools=tools, stream_tools=True)
+        events = []
+        for ch in raw:
+            events.extend(p.feed(ch))
+        events.extend(p.finish())
+        args_json = "".join(e.text for e in events if e.kind == "tool_args")
+        self.assertEqual(json.loads(args_json), {"text": 'hello \\\"world\\\"\nsecond line', "n": 7})
+        final = [e for e in events if e.kind == "tool_call"]
+        self.assertEqual(len(final), 1)
+        self.assertEqual(final[0].call.name, "alpha")
+        self.assertEqual(final[0].call.arguments["n"], 7)
+
+    def test_truncated_streamed_call_closes_valid_json(self):
+        tools = [{"name": "alpha", "parameters": {"type": "object", "properties": {
+            "text": {"type": "string"}}}}]
+        p = OutputParser(thinking=False, tools=tools, stream_tools=True)
+        events = p.feed("<tool_call><function=alpha><parameter=text>unfinished") + p.finish()
+        args_json = "".join(e.text for e in events if e.kind == "tool_args")
+        self.assertEqual(json.loads(args_json), {"text": "unfinished"})
+        self.assertEqual(len([e for e in events if e.kind == "tool_call"]), 1)
+
+    def test_malformed_parameter_start_does_not_crash_stream(self):
+        tools = [{"name": "alpha", "parameters": {"type": "object", "properties": {
+            "text": {"type": "string"}}}}]
+        p = OutputParser(thinking=False, tools=tools, stream_tools=True)
+        events = p.feed("<tool_call><function=alpha><parameter=text</tool_call>") + p.finish()
+        args_json = "".join(e.text for e in events if e.kind == "tool_args")
+        self.assertEqual(json.loads(args_json), {})
+        calls = [e for e in events if e.kind == "tool_call"]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].call.name, "alpha")
+        self.assertEqual(calls[0].call.arguments, {})
+
+    def test_malformed_function_header_is_content_not_server_error(self):
+        p = OutputParser(thinking=False, tools=[{"name": "alpha"}], stream_tools=True)
+        raw = "<tool_call><function=alpha</tool_call>"
+        events = p.feed(raw) + p.finish()
+        self.assertFalse([e for e in events if e.kind == "tool_call"])
+        self.assertEqual("".join(e.text for e in events if e.kind == "content"), raw)
+
+    def test_forced_tool_postcondition_rejects_false_success_and_wrong_function(self):
+        plain = {"choices": [{"message": {"content": "I called it."}}]}
+        self.assertIn("no tool call", _forced_tool_error({"tool_choice": "required"}, plain))
+        named = {"type": "function", "function": {"name": "alpha"}}
+        wrong = {"choices": [{"message": {"tool_calls": [{"function": {"name": "beta", "arguments": "{}"}}]}}]}
+        self.assertIn("'alpha'", _forced_tool_error({"tool_choice": named}, wrong))
+        right = {"choices": [{"message": {"tool_calls": [{"function": {"name": "alpha", "arguments": "{}"}}]}}]}
+        self.assertIsNone(_forced_tool_error({"tool_choice": named}, right))
+
+    def test_required_tool_false_success_is_503_before_streaming(self):
+        tok = ByteTokenizer()
+        svc = Service(MockEngine(tok, "</think>\n\nI called alpha already.", max_context=CTX), tok,
+                      ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        httpd = serve(svc, port=0)
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        try:
+            for stream in (False, True):
+                body = {"model": "m", "messages": [{"role": "user", "content": "do it"}],
+                        "tools": self.TOOLS, "tool_choice": "required", "stream": stream, "max_tokens": 80}
+                req = urllib.request.Request(base + "/v1/chat/completions", data=json.dumps(body).encode(),
+                                             headers={"Content-Type": "application/json"})
+                with self.subTest(stream=stream):
+                    with self.assertRaises(urllib.error.HTTPError) as got:
+                        urllib.request.urlopen(req, timeout=30)
+                    self.assertEqual(got.exception.code, 503)
+                    payload = json.loads(got.exception.read())
+                    self.assertIn("requires a function call", payload["error"]["message"])
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
 
 
 class MaxTokens(unittest.TestCase):

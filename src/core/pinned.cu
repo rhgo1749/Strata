@@ -5,6 +5,7 @@
 #include <cuda_runtime.h>
 
 #include <atomic>
+#include <cerrno>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -15,7 +16,10 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <linux/mman.h>
 #ifndef MAP_HUGE_2MB
 #define MAP_HUGE_2MB (21 << 26)
@@ -25,6 +29,72 @@
 namespace strata::core {
 
 namespace {
+
+#ifndef _WIN32
+// Experimental multi-GPU/process mode.  ArenaExpertSource normally reserves a private anonymous mapping, so
+// three independent Strata engines would keep three physical copies of the (40+ GiB for IQ3) expert arena.
+// When both variables below are set, exactly ONE PinnedArena allocation - the one whose byte size matches -
+// is backed by a regular MAP_SHARED file instead.  Independent processes that use the same path therefore see
+// the same page-cache pages while each process still owns its CUDA registration, streams and VRAM expert tier.
+//
+// The exact byte guard is important.  CUDA and the prompt path allocate other host mappings too; a pathname by
+// itself is not enough to identify the expert arena safely.  The launcher in serve/multigpu_server.py computes
+// `total expert bytes + largest expert blob`, which is exactly what ArenaExpertSource passes to PinnedArena.
+//
+// This is intentionally Linux-only for now.  It is an opt-in fork feature and leaves the upstream/default
+// anonymous arena untouched when the variables are absent.
+void* reserve_shared_file(uint64_t bytes, PageBacking& got, std::string& note, bool& requested) {
+    requested = false;
+    const char* path = std::getenv("STRATA_SHARED_ARENA_FILE");
+    const char* exact = std::getenv("STRATA_SHARED_ARENA_BYTES");
+    if (path == nullptr || *path == '\0' || exact == nullptr || *exact == '\0') return nullptr;
+
+    errno = 0;
+    char* end = nullptr;
+    const unsigned long long want = std::strtoull(exact, &end, 10);
+    if (errno != 0 || end == exact || *end != '\0' || want == 0 || want != bytes) return nullptr;
+    requested = true;
+
+    const int fd = ::open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        note = "shared arena open failed for " + std::string(path) + ": " + std::strerror(errno);
+        return nullptr;
+    }
+
+    struct stat st{};
+    if (fstat(fd, &st) != 0) {
+        const int e = errno;
+        ::close(fd);
+        note = "shared arena stat failed for " + std::string(path) + ": " + std::strerror(e);
+        return nullptr;
+    }
+    if ((uint64_t) st.st_size != bytes && ftruncate(fd, (off_t) bytes) != 0) {
+        const int e = errno;
+        ::close(fd);
+        note = "shared arena resize failed for " + std::string(path) + ": " + std::strerror(e);
+        return nullptr;
+    }
+
+    void* p = mmap(nullptr, (size_t) bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    const int map_errno = errno;
+#if defined(POSIX_FADV_WILLNEED)
+    if (p != MAP_FAILED) (void) posix_fadvise(fd, 0, (off_t) bytes, POSIX_FADV_WILLNEED);
+#endif
+    ::close(fd);
+    if (p == MAP_FAILED) {
+        note = "shared arena mmap failed for " + std::string(path) + ": " + std::strerror(map_errno);
+        return nullptr;
+    }
+
+    // The arena is populated by the existing expert loader immediately after construction.  MAP_SHARED makes
+    // those pages the same physical pages in every lane process; the file is merely their rendezvous/backing.
+    // Each process may still cudaHostRegister/mlock the mapping below, which preserves all of the existing
+    // GPU-cache and CPU-miss paths without teaching them about multiple GPUs.
+    got = PageBacking::NormalPages;
+    note = "shared file-backed arena (" + std::string(path) + ")";
+    return p;
+}
+#endif
 
 // A 2 MB-aligned reservation.  Large pages first, then the largest alignment the OS will give us for free.
 void* reserve(uint64_t bytes, PageBacking& got, std::string& note) {
@@ -76,6 +146,9 @@ void* reserve(uint64_t bytes, PageBacking& got, std::string& note) {
     got = PageBacking::NormalPages;
     return p;
 #else
+    bool shared_requested = false;
+    if (void* shared = reserve_shared_file(bytes, got, note, shared_requested); shared_requested) return shared;
+
     void* p = mmap(nullptr, bytes, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_HUGE_2MB, -1, 0);
     if (p != MAP_FAILED) {
