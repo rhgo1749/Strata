@@ -67,9 +67,11 @@ The trade-off is explicit: when only one request is active, other GPU lanes may 
 
 ## Current promoted engine baseline
 
-The shared-lane runtime has been revalidated on the fork after syncing upstream Strata **0.1.22** (`9dda206`). The existing multi-lane launch contract and command-line surface remained compatible; no migration flag was required for the reference 3-lane recipe.
+The shared-lane runtime has been revalidated after syncing upstream Strata **0.1.24** in merge commit `82a5161`. The 3-lane launch contract remains unchanged: one engine per GPU, 262144 context and 32768 resident KV per lane on the reference host, disjoint CPU partitions, per-lane PCIe tuning, and one shared expert arena.
 
-The 0.1.22 promotion retained the shared-arena / independent-lane architecture while inheriting upstream prompt-path optimizations. Reference-host benchmark numbers and historical 0.1.21 comparisons are maintained in the public GPU-per-lane recipe repository rather than duplicated here.
+The promotion passed 52 server/multi-GPU tests, the production CUDA build, IQ3_XXS and IQ3_S per-lane versus layer-split benchmarks, and a 140K-token no-reuse request on all three lanes concurrently. The supervisor also strips inherited `gpu` / `layer_split` settings from lane configs so an upstream multi-GPU config cannot accidentally re-expand a lane into layer-split mode.
+
+Adaptive hot-expert replacement remains engine-local to each lane. Optional `STRATA_ADAPT_TRACE` instrumentation records first routed misses, adaptive swap selection/publication, and the first later GPU-resident hit without changing the default serving path when tracing is disabled. Reference-host timing and A/B results live in the public recipe repository.
 
 ## Compatibility and limitations
 

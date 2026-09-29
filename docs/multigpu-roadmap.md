@@ -2,7 +2,7 @@
 
 This roadmap covers the experimental multi-GPU runtime in this fork. It is intentionally conservative: the current independent-lane design remains the production baseline until a more complex design proves a repeatable advantage on real serving workloads.
 
-Concrete reference-host hardware, tuning values, benchmark tables, and production validation records live in the separate public recipe repository: [`rhgo1749/strata-gpu-per-lane-serving-recipe`](https://github.com/rhgo1749/strata-gpu-per-lane-serving-recipe).
+Concrete reference-host hardware, tuning values, benchmark tables, and production validation records live in the separate public recipe repository: [`rhgo1749/qwen3.8-flash-next-strata-gpu-per-lane-recipe`](https://github.com/rhgo1749/qwen3.8-flash-next-strata-gpu-per-lane-recipe).
 
 ## Current production baseline
 
@@ -25,13 +25,15 @@ Prefer coarse-grained request/session parallelism while it wins on the workload 
 
 A more sophisticated multi-GPU mechanism is not automatically an improvement. Cross-GPU expert routing, token-level synchronization, dynamic KV movement, or a single-process distributed engine all introduce synchronization and data movement. They should only replace the current lane model after an A/B test shows a material and repeatable gain without reducing stability, required context capacity, or API/agent correctness.
 
-## Latest promotion checkpoint — Strata 0.1.22 (2026-09-29)
+## Latest promotion checkpoint — Strata 0.1.24 (2026-09-30)
 
-The independent-lane baseline was revalidated after syncing upstream Strata 0.1.22 into the fork (`9dda206`). The existing 3-lane launch contract remained unchanged: 262144 context and 32768 resident KV per lane, 5/6/5 physical-core partitioning, 0.55/0.25/0.55 lane PCIe fractions, and one ~39.97 GiB shared expert arena.
+The independent-lane baseline was revalidated after syncing upstream Strata 0.1.24 into the fork (`82a5161`). The existing 3-lane launch contract remained unchanged: 262144 context and 32768 resident KV per lane, 5/6/5 physical-core partitioning, 0.55/0.25/0.55 lane PCIe fractions, and one shared expert arena.
 
-On the reference 3 × RTX 5070 Ti host, the promoted 0.1.22 candidate completed the server/multi-GPU test suite, a full CUDA build, three-lane startup, upstream layer-split startup, short decode probes, concurrent warm serving, and a 15K no-reuse prompt-processing probe. The clean warm three-request wall aggregate measured **226.5–227.9 tok/s**, while the 15,064-token no-reuse single-lane prompt processed at **2,492.2 tok/s** in the promotion run.
+On the reference 3 × RTX 5070 Ti host, the 0.1.24 candidate passed 52 server/multi-GPU tests and the production CUDA build. IQ3_XXS clean warm three-request wall aggregate ranged **218.4–233.7 tok/s** (mean **225.5 tok/s**); 15K no-reuse prompt processing measured **2453.5 / 2046.0 / 2450.8 tok/s** across the x8/x4/x8 lanes. IQ3_S clean warm aggregate ranged **176.8–199.4 tok/s** (mean **187.1 tok/s**); 15K PP measured **2381.8 / 1852.2 / 2371.8 tok/s**.
 
-The same 0.1.22 binary also kept upstream layer-split operational at 262K. In that challenger smoke, layer-split produced **80.6 tok/s** on the short single-request decode probe and **1,142.3 tok/s** on the same-size 15K no-reuse prompt-processing probe. The independent-lane path therefore remains the production baseline: layer-split retains a single-request decode advantage, but it did not clear the roadmap's aggregate/prompt-processing promotion gate for the target concurrent workload.
+The same binary kept upstream layer-split operational: IQ3_XXS clean warm single-request decode measured **93.5–99.9 tok/s** with 15K PP **1144.4 tok/s**, while IQ3_S measured **74.2–81.7 tok/s** with 15K PP **938.0 tok/s**. A no-reuse ~140K prompt was also served concurrently on all three IQ3_S lanes without OOM or lane death. The independent-lane path therefore remains the production baseline for concurrent agent serving; layer-split remains the single-request challenger.
+
+A controlled IQ3_S single-lane A/B also confirmed that adaptive hot-expert replacement is materially useful on this workload: two retained 512-token adaptive rounds averaged **69.43 tok/s** versus **54.14 tok/s** with `--adapt-swaps 0` (**+28.3%**), while hit rate rose from about **61%** to **86.5–87%**. Detailed miss/swap/residency timing and caveats belong in the public recipe repository.
 
 Reference-host benchmark detail and historical comparisons belong in the public GPU-per-lane recipe repository; this document records only the architecture-level promotion outcome.
 
