@@ -74,9 +74,10 @@ When an accepted decision changes durable behavior, update the owning canonical 
 The current canonical multi-GPU documents are:
 
 - [`multigpu-shared-runtime.md`](multigpu-shared-runtime.md) — implemented shared-arena / independent-lane runtime contract;
+- [`multigpu-hardware-guide.md`](multigpu-hardware-guide.md) — hardware sizing, RAM/CPU/PCIe guidance and bring-up checklist;
 - [`multigpu-roadmap.md`](multigpu-roadmap.md) — future architecture challengers and promotion gates.
 
-Concrete reference-host hardware, tuning values, benchmark numbers, and production validation records intentionally live in the separate public recipe repository: [`rhgo1749/strata-gpu-per-lane-serving-recipe`](https://github.com/rhgo1749/strata-gpu-per-lane-serving-recipe).
+Concrete reference-host hardware, tuning values, benchmark numbers, and production validation records intentionally live in the separate public recipe repository: [`rhgo1749/qwen3.8-flash-next-strata-gpu-per-lane-recipe`](https://github.com/rhgo1749/qwen3.8-flash-next-strata-gpu-per-lane-recipe).
 
 The production baseline remains independent GPU lanes with a shared host expert arena until a challenger clears the roadmap's measurement and compatibility gates.
 
