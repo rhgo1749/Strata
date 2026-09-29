@@ -13,6 +13,109 @@ of a word): faster than you can read.
 
 - **Free and open source.**
 
+## This fork: configurable multi-GPU GPU-per-lane serving
+
+This fork keeps Strata's existing single-GPU numerical engine intact and adds an **experimental Linux multi-GPU serving mode** around it.
+
+The design is deliberately coarse-grained:
+
+- run **one ordinary Strata engine process per GPU lane**;
+- send one whole generation request/session to one free lane;
+- run several requests concurrently on different GPUs;
+- physically share the large host-RAM expert arena between lane processes with a Linux `MAP_SHARED` file-backed mapping;
+- keep CUDA state, GPU hot-expert cache, resident KV, host-KV/session state, and failures local to each lane;
+- avoid mandatory token-by-token GPU synchronization in the normal serving path.
+
+This is **request/session parallelism**, not tensor parallelism, pipeline parallelism, or cross-GPU expert parallelism. A slower GPU therefore slows the request assigned to that lane rather than forcing every other GPU to wait for it. The trade-off is that a single active request normally uses one GPU lane while the other lanes can remain idle.
+
+```mermaid
+flowchart TB
+    C[Clients / agents / OpenAI-compatible API] --> D[Multi-GPU dispatcher]
+
+    subgraph RAM[System RAM]
+        E[Shared expert arena\nMAP_SHARED: one physical copy]
+        K0[Lane 0 host KV / session]
+        K1[Lane 1 host KV / session]
+        KN[Lane N host KV / session]
+    end
+
+    D -->|request A| G0[GPU 0\nindependent Strata lane]
+    D -->|request B| G1[GPU 1\nindependent Strata lane]
+    D -->|request ...| GN[GPU N\nindependent Strata lane]
+
+    E --> G0
+    E --> G1
+    E --> GN
+    K0 --> G0
+    K1 --> G1
+    KN --> GN
+```
+
+### Adapt it to your own hardware
+
+The multi-GPU runtime is **not hard-coded for one GPU count, one PCIe topology, or one reference machine**. Serving parameters are selected at launch and comma-separated per-lane options are validated against the number of GPUs.
+
+| Option | What it controls |
+| --- | --- |
+| `--gpus` | physical GPU IDs used as independent generation lanes |
+| `--lane-contexts` | maximum context capacity for each lane |
+| `--kv-budget` | total configured host-KV token-capacity guard |
+| `--cpu-partition auto` | automatically split visible physical CPU cores between lanes while keeping SMT siblings together |
+| `--lane-cpu-cores` | exact physical-core count assigned to each lane; overrides automatic partitioning |
+| `--lane-pcie-fracs` | optional per-lane Strata `--pcie-frac` overrides for asymmetric PCIe/CPU behavior |
+| `--lane-kv-residents` | per-lane GPU-resident KV window |
+| `--arena-file` | shared expert-arena backing file |
+| `--state-dir` | generated per-lane configuration/state directory |
+| `--port` | public multi-GPU API port |
+| `--base-port` | first private lane-server port |
+| `--startup-timeout` | maximum readiness wait for a lane |
+| `--allow-context-over-262k` | explicit opt-in for context sizes above the currently validated 262K boundary |
+
+For example, a two-GPU host can start from a conservative configuration and let Strata partition the CPU automatically:
+
+```bash
+python serve/multigpu_server.py \
+  --config /path/to/working-strata-config.json \
+  --gpus 0,1 \
+  --lane-contexts 131072,131072 \
+  --kv-budget 262144 \
+  --cpu-partition auto \
+  --lane-kv-residents 32768,32768 \
+  --port 18086
+```
+
+A three- or four-GPU host uses the same interface: provide one value per lane for the options you want to override. Mixed-performance GPUs are also possible as long as **each individual GPU can fit a usable Strata lane**.
+
+Start from a working single-GPU Strata configuration first. Then add lanes and measure your own machine rather than copying another host's CPU split, PCIe fractions, context sizes, or resident-KV values. In particular, the runtime does not yet automatically infer the optimal `pcie-frac`, context allocation, resident KV, or scheduling weight from your hardware.
+
+### What the fork adds
+
+Beyond the shared expert arena and GPU-per-lane supervisor, the fork currently includes:
+
+- physical-core-aware CPU partitioning for independent expert-worker pools;
+- optional asymmetric per-lane context, PCIe/cache and resident-KV tuning;
+- automatic derivation of the exact shared expert-arena allocation size from the native expert metadata;
+- sequential lane startup with health/readiness checks to avoid racing while the arena is populated;
+- controlled `SIGTERM`/`SIGHUP` shutdown so child lane engines do not remain orphaned and hold VRAM;
+- a streaming-aware reverse proxy for OpenAI-compatible generation endpoints;
+- `/__multigpu/status` for lane PID/liveness, GPU assignment, context, CPU affinity and configured lane parameters;
+- OpenAI `tool_choice=auto|none|required` and named-function compatibility;
+- streamed tool-call argument handling and malformed tool-output hardening;
+- multi-GPU serving tests and a standalone OpenAI-compatible tool-call probe.
+
+The normal single-GPU Strata path remains available and does not require the shared-arena environment variables. The shared-arena multi-process mode itself is currently **Linux-only**; ordinary Strata remains usable on Windows and Linux.
+
+### Current boundaries
+
+The production multi-GPU path does **not** currently implement tensor parallelism, pipeline parallelism, cross-GPU expert ownership, GPU-to-GPU KV migration, a dynamic shared KV allocator, or single-process multi-GPU decode. Those remain architecture challengers and should only replace the simpler lane model after repeatable end-to-end measurements justify the extra coupling.
+
+For the current contract and future work, see:
+
+- [`docs/multigpu-shared-runtime.md`](docs/multigpu-shared-runtime.md) — implemented multi-GPU runtime contract;
+- [`docs/multigpu-roadmap.md`](docs/multigpu-roadmap.md) — scheduler/startup improvements and architecture challengers;
+- [`docs/DECISIONS.md`](docs/DECISIONS.md) — architecture decision provenance / Issue-as-ADR policy;
+- [`rhgo1749/strata-gpu-per-lane-serving-recipe`](https://github.com/rhgo1749/strata-gpu-per-lane-serving-recipe) — reference-host configuration, reproducible measurements and tuning examples.
+
 > **Jump to:** [How fast?](#how-fast-is-it) · [Which model?](#which-model-should-i-pick) · [Install](#install) ·
 > [Using it](#using-it) · [Problems?](#something-went-wrong) · [How it works](#how-does-it-work) ·
 > [All the details](docs/DETAILS.md)
@@ -122,8 +225,7 @@ the same way - nothing big is downloaded again.
 - **Experimental speed projection (off by default):** an experimental control vector that setup can turn on; it
   changes how the model answers - read [what it does](docs/DETAILS.md#experimental-speed-projection-experimental-off-by-default) first.
 
-**Good to know:** it answers one request at a time. The first message of a chat is read in full (about 1 minute per
-30,000 tokens); after that it keeps the conversation and reads only what is new, so follow-ups start in seconds.
+**Good to know:** the default single-GPU server answers one request at a time. This fork's experimental Linux multi-GPU supervisor instead allows multiple generation requests to run concurrently, with one active request leased to each available GPU lane. The first message of a chat is read in full (about 1 minute per 30,000 tokens); after that Strata can reuse conversation state and read only what is new, so follow-ups start much sooner.
 
 ## Something went wrong?
 
