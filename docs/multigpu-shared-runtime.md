@@ -71,6 +71,8 @@ The shared-lane runtime has been revalidated on the fork after syncing upstream 
 
 The 0.1.22 promotion retained the shared-arena / independent-lane architecture while inheriting upstream prompt-path optimizations. Reference-host benchmark numbers and historical 0.1.21 comparisons are maintained in the public GPU-per-lane recipe repository rather than duplicated here.
 
+Controlled reference-host evidence for the architecture now includes **1→2→3 lane scaling, private-vs-shared arena PSS, and mixed RTX 5070 Ti + RTX 5060 Ti isolation**. The measurements, conditions, and caveats live in [`docs/systems-ablation-20260929.md`](https://github.com/rhgo1749/qwen3.8-flash-next-strata-gpu-per-lane-recipe/blob/main/docs/systems-ablation-20260929.md); this implementation document intentionally does not duplicate hardware-specific result tables.
+
 ## Compatibility and limitations
 
 The supervisor proxies Strata's OpenAI-compatible generation endpoints and preserves streaming. Functional serving behavior is covered by repository tests and reusable probes; concrete reference-host soak counts belong in the recipe repository.
