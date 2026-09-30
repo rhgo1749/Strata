@@ -86,6 +86,41 @@ class MultiGpuPlanningTests(unittest.TestCase):
         got["args"] = M.replace_option(got["args"], "--vram-reserve-mib", 1200)
         self.assertEqual(M.option_value(got["args"], "--vram-reserve-mib"), "1200")
 
+    def test_shared_arena_uses_upstream_cli_and_replaces_stale_value(self):
+        cfg = {"args": ["--pack", "/m", "--shared-expert-arena", "/old"]}
+        got = M.apply_shared_arena(cfg, Path("/dev/shm/strata/new.bin"))
+        self.assertEqual(M.option_value(got["args"], "--shared-expert-arena"), "/dev/shm/strata/new.bin")
+        self.assertEqual(got["args"].count("--shared-expert-arena"), 1)
+        self.assertEqual(M.option_value(cfg["args"], "--shared-expert-arena"), "/old")
+
+    def test_private_arena_strips_inherited_shared_arena(self):
+        cfg = {"args": ["--pack", "/m", "--shared-expert-arena", "/old", "--kv", "int8"]}
+        got = M.apply_shared_arena(cfg, None)
+        self.assertNotIn("--shared-expert-arena", got["args"])
+        self.assertEqual(got["args"], ["--pack", "/m", "--kv", "int8"])
+
+    def test_default_shared_arena_is_tmpfs(self):
+        spec = M.ArenaSpec(bytes=100, expert_bytes=80, max_blob=20, n_expert=512)
+        path = M.default_arena_file(Path("/models/pack"), spec)
+        self.assertEqual(path.parts[:3], ("/", "dev", "shm"))
+
+    def test_port_preflight_rejects_stale_listener(self):
+        sock = M.socket.socket(M.socket.AF_INET, M.socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        try:
+            with self.assertRaisesRegex(RuntimeError, "already in use"):
+                M.require_ports_free("127.0.0.1", [port])
+        finally:
+            sock.close()
+
+    def test_port_preflight_accepts_free_port_and_ephemeral_public_port(self):
+        sock = M.socket.socket(M.socket.AF_INET, M.socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+        M.require_ports_free("127.0.0.1", [port, 0])
+
     def test_parse_vision_lane_indices(self):
         self.assertEqual(M.parse_lane_indices("1", 3, what="--vision-lanes"), {1})
         self.assertEqual(M.parse_lane_indices("0,2", 3, what="--vision-lanes"), {0, 2})

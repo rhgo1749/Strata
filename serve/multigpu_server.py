@@ -4,7 +4,7 @@ This keeps Strata's existing single-GPU engine intact and composes several engin
 processes into independent request lanes:
 
 * each lane sees exactly one CUDA device (CUDA_VISIBLE_DEVICES)
-* the resident expert arena is backed by one MAP_SHARED file (fork patch in pinned.cu)
+* the resident expert arena is backed by upstream Strata's --shared-expert-arena MAP_SHARED file
 * each lane keeps its own dense/QSA/MTP weights, hot-expert VRAM cache, and KV-resident window
 * the full KV stays in host RAM through Strata's existing --kv-resident path
 * PLE remains Strata's existing direct/O_DIRECT SSD reader
@@ -22,6 +22,7 @@ import json
 import os
 import re
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -100,6 +101,16 @@ def apply_vision_capability(lane_cfg: dict, enabled: bool) -> dict:
     if isinstance(lane_cfg.get("args"), list):
         lane_cfg["args"] = remove_flag(lane_cfg["args"], "--vision")
         lane_cfg["args"] = remove_option(lane_cfg["args"], "--vram-reserve-mib")
+    return lane_cfg
+
+
+def apply_shared_arena(lane_cfg: dict, arena_file: Path | None) -> dict:
+    """Use upstream 0.1.30's explicit shared-arena CLI and never inherit a stale backing."""
+    lane_cfg = copy.deepcopy(lane_cfg)
+    args = remove_option(list(lane_cfg.get("args") or []), "--shared-expert-arena")
+    if arena_file is not None:
+        args += ["--shared-expert-arena", str(arena_file)]
+    lane_cfg["args"] = args
     return lane_cfg
 
 
@@ -337,8 +348,10 @@ def default_arena_file(pack: Path, spec: ArenaSpec) -> Path:
     key = hashlib.sha256(
         (str(pack.resolve()) + f"\0{spec.expert_bytes}\0{spec.max_blob}").encode("utf-8")
     ).hexdigest()[:16]
-    base = Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache"))
-    return base / "strata" / "shared-arena" / f"{pack.name}-{key}.bin"
+    # Upstream 0.1.30's file-backed arena is intended for tmpfs.  Keep the
+    # default off persistent storage; --arena-file remains available for an
+    # operator-selected tmpfs path.
+    return Path("/dev/shm") / "strata" / "shared-arena" / f"{pack.name}-{key}.bin"
 
 
 @dataclass
@@ -551,6 +564,25 @@ class LanePool:
     def queue_depth(self) -> int:
         with self.cv:
             return len(self.waiters)
+
+
+def require_ports_free(host: str, ports: list[int]) -> None:
+    """Fail before model loading if any fixed supervisor/lane port is already occupied."""
+    held: list[socket.socket] = []
+    try:
+        for port in ports:
+            if port == 0:
+                continue
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                s.bind((host, port))
+            except OSError as e:
+                s.close()
+                raise RuntimeError(f"port {host}:{port} is already in use") from e
+            held.append(s)
+    finally:
+        for s in held:
+            s.close()
 
 
 def wait_ready(lane: Lane, timeout: float) -> None:
@@ -803,6 +835,12 @@ def main() -> int:
     arena_file = Path(a.arena_file).expanduser().resolve() if a.arena_file else default_arena_file(pack, spec)
     arena_file.parent.mkdir(parents=True, exist_ok=True)
 
+    try:
+        require_ports_free("127.0.0.1", [a.base_port + i for i in range(len(gpus))])
+        require_ports_free(a.host, [a.port])
+    except RuntimeError as e:
+        ap.error(str(e))
+
     core_groups = physical_core_cpu_sets()
     cpu_sets: list[tuple[int, ...] | None] = [None] * len(gpus)
     try:
@@ -853,6 +891,7 @@ def main() -> int:
         lane_cfg = sanitize_lane_config(cfg)
         lane_vision = i in vision_lanes
         lane_cfg = apply_vision_capability(lane_cfg, lane_vision)
+        lane_cfg = apply_shared_arena(lane_cfg, None if a.private_arena else arena_file)
         lane_cfg["args"] = replace_option(lane_cfg["args"], "--max-context", ctx)
         if pcie_fracs[i] is not None:
             lane_cfg["args"] = replace_option(lane_cfg["args"], "--pcie-frac", pcie_fracs[i])
@@ -913,12 +952,11 @@ def main() -> int:
         for lane in lanes:
             env = dict(os.environ)
             env["CUDA_VISIBLE_DEVICES"] = lane.gpu
-            if a.private_arena:
-                env.pop("STRATA_SHARED_ARENA_FILE", None)
-                env.pop("STRATA_SHARED_ARENA_BYTES", None)
-            else:
-                env["STRATA_SHARED_ARENA_FILE"] = str(arena_file)
-                env["STRATA_SHARED_ARENA_BYTES"] = str(spec.bytes)
+            # Pre-0.1.30 fork builds used these variables to intercept mmap.
+            # Upstream 0.1.30 owns the feature through --shared-expert-arena;
+            # strip inherited legacy knobs so lane configs are the sole source.
+            env.pop("STRATA_SHARED_ARENA_FILE", None)
+            env.pop("STRATA_SHARED_ARENA_BYTES", None)
             cmd = [
                 sys.executable, str(ROOT / "serve" / "server.py"),
                 "--engine", "strata",

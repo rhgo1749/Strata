@@ -17,9 +17,9 @@ Detailed reference-host hardware, tuning values, benchmark tables, and validatio
 
 ## Shared arena
 
-The implementation extends `PinnedArena` with an exact-size file-backed mode on Linux. Only the allocation matching the derived expert-arena size uses the shared backing. Other pinned allocations keep the normal path.
+Strata 0.1.30 provides the file-backed arena primitive upstream through `--shared-expert-arena FILE` (originating from this fork's upstream PR #129). On Linux, upstream `PinnedArena` maps one shared file with a 4 KiB header containing the arena geometry and pack fingerprint; incompatible size or pack identity is refused before the arena is used. The ordinary anonymous/hugetlb path remains unchanged when the option is absent.
 
-The supervisor derives the expert-arena size from the native expert metadata and supplies the same backing file and expected byte size to every lane process.
+The lane supervisor now composes that upstream primitive rather than intercepting `mmap`: it strips any inherited shared-arena option, adds the same explicit `--shared-expert-arena` path to every shared lane, and removes the option entirely for the private-arena benchmark arm. The default backing lives under `/dev/shm`, matching upstream's tmpfs contract; an explicit `--arena-file` can select another operator-managed tmpfs path.
 
 Lane startup is currently sequential because each ordinary engine initialization still populates the mapped arena. A future leader/follower initialization mechanism can remove that repeated source load without changing the steady-state sharing model.
 
@@ -74,13 +74,15 @@ The shared-lane runtime is currently based on upstream Strata **0.1.27**. The 3-
 
 The 0.1.27 promotion preserved the CUDA/shared-arena path and the supervisor continues to strip inherited `gpu` / `layer_split` settings from lane configs so an upstream multi-GPU config cannot accidentally re-expand a lane into layer-split mode. Post-paper serving hardening adds multi-session lane affinity and live-state-aware placement without changing the engine execution model.
 
-### Strata 0.1.29 sync candidate
+### Strata 0.1.30 sync candidate
 
-An isolated sync branch rebases the lane runtime onto upstream Strata 0.1.29 without changing the one-engine-per-lane execution contract. The compatibility pass keeps upstream's request-cancellation/session reset fixes, prompt-path fatal-CUDA handling, MTP/native-head VRAM reservation, verify-window bounds guards, prompt-kernel changes, and split sampler while retaining the fork's shared-arena wrapper, adaptive tracing, supervisor, and scheduler.
+An isolated sync branch rebases the lane runtime onto upstream Strata 0.1.30 without changing the one-engine-per-lane execution contract. It supersedes the unpromoted 0.1.29 candidate. The compatibility pass keeps upstream's new resident-expert/cache-complement path, conversation snapshot/cache machinery, sampler/MTP changes, RoPE-scaling support and native shared-arena implementation while retaining the fork's adaptive tracing, supervisor and session-aware lane scheduler.
 
-The shared-arena wrapper still embeds the upstream pinned-arena implementation byte-for-byte; the 0.1.29 upstream `src/core/pinned.cu` hash matches the fork's `src/core/pinned_upstream_impl.cu`. Source-level serving tests, an sm_120 CUDA 13.4 build, available CUDA parity tests, real-model single-lane output parity against 0.1.27, stream-cancellation recovery, one-lane shared-arena serving, and a three-lane concurrent smoke run have passed on the reference host. Model-fixture-dependent tests that require the repository's optional `pack/full/experts.bin` or PLE capture fixtures remain unavailable in the isolated worktree and are not counted as passes.
+The shared-arena implementation is no longer a fork-owned mmap wrapper: the supervisor passes upstream's native `--shared-expert-arena` option to each lane. Upstream conversation parking remains opt-in and is left disabled in the reference lane configuration until the supervisor can model parked-conversation locality explicitly; ordinary per-engine prompt-cache/live-state affinity continues to work as before.
 
-This is intentionally a **sync candidate, not yet the promoted measurement baseline**. The reference recipe and paper-facing headline tables must be regenerated on one consistent 0.1.29 generation before promotion; historical 0.1.27/earlier performance numbers are not evidence for 0.1.29.
+On the reference host, the candidate has passed the full Python serving suite (123 tests, 5 skipped), an sm_120 CUDA 13.4 build, and 38 of 41 registered CTests. The three CTest failures require absent external model/pack fixtures (`ple_parity`, `expert_parity`, `pool_test`) and are not counted as implementation regressions. A real two-lane IQ3_S smoke test on GPU0+GPU2 also passed: both engines used the same 0.1.30 shared backing inode under `/dev/shm`, each mapping reported `Shared_Dirty: 49,116,200 kB`, `Private_Dirty: 0`, and half-share PSS, and both lanes completed generation requests.
+
+This is intentionally a **sync candidate, not yet the promoted measurement baseline**. The reference recipe and paper-facing headline tables must be regenerated on one consistent 0.1.30 generation before promotion; historical 0.1.29/0.1.27/earlier performance numbers are not evidence for 0.1.30.
 
 Adaptive hot-expert replacement remains engine-local to each lane. Optional `STRATA_ADAPT_TRACE` instrumentation records first routed misses, adaptive swap selection/publication, and the first later GPU-resident hit without changing the default serving path when tracing is disabled. Reference-host timing and A/B results live in the public recipe repository.
 
