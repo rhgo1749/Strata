@@ -361,15 +361,15 @@ class Lane:
 
 
 def lane_engine_alive(lane: Lane, timeout: float = 0.2) -> bool:
-    """Return whether both the lane wrapper and its child engine are currently healthy."""
+    """Return whether both the lane wrapper and its child engine currently expose the model."""
     if lane.process is None or lane.process.poll() is not None:
         return False
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{lane.port}/health", timeout=timeout) as r:
+        with urllib.request.urlopen(f"http://127.0.0.1:{lane.port}/v1/models", timeout=timeout) as r:
             if not (200 <= r.status < 300):
                 return False
             payload = json.loads(r.read() or b"{}")
-            return bool(payload.get("engine_alive", payload.get("status") == "ok"))
+            return bool(payload.get("data"))
     except Exception:
         return False
 

@@ -18,11 +18,20 @@ SPEC.loader.exec_module(M)
 
 
 class _AliveProcess:
+    pid = 12345
+
     def poll(self):
         return None
 
 
 class MultiGpuPlanningTests(unittest.TestCase):
+    def setUp(self):
+        self._lane_engine_alive = M.lane_engine_alive
+        M.lane_engine_alive = lambda lane: lane.process is not None and lane.process.poll() is None
+
+    def tearDown(self):
+        M.lane_engine_alive = self._lane_engine_alive
+
     def test_replace_existing_option(self):
         args = ["--pack", "/m", "--max-context", "131072", "--kv", "int8"]
         self.assertEqual(
@@ -68,6 +77,14 @@ class MultiGpuPlanningTests(unittest.TestCase):
         self.assertIn("vision", got)
         self.assertIn("--vision", got["args"])
         self.assertIn("--vram-reserve-mib", got["args"])
+
+    def test_nonvision_lane_can_reapply_explicit_vram_reserve(self):
+        cfg = {"vision": {"exe": "/v", "gpu": True},
+               "args": ["--pack", "/m", "--vision", "--vram-reserve-mib", "700"]}
+        got = M.apply_vision_capability(M.sanitize_lane_config(cfg), False)
+        self.assertNotIn("--vram-reserve-mib", got["args"])
+        got["args"] = M.replace_option(got["args"], "--vram-reserve-mib", 1200)
+        self.assertEqual(M.option_value(got["args"], "--vram-reserve-mib"), "1200")
 
     def test_parse_vision_lane_indices(self):
         self.assertEqual(M.parse_lane_indices("1", 3, what="--vision-lanes"), {1})
@@ -386,8 +403,42 @@ class MultiGpuPlanningTests(unittest.TestCase):
             M.Lane(1, "1", 19087, 262144, Path("lane1.json"), vision=True, process=_AliveProcess()),
         ]
         pool = M.LanePool(lanes)
-        self.assertEqual(pool.metadata_lane(lanes[0]).index, 1)
+        old = M.lane_engine_alive
+        M.lane_engine_alive = lambda lane: lane.index == 1
+        try:
+            self.assertEqual(pool.metadata_lane(lanes[0]).index, 1)
+        finally:
+            M.lane_engine_alive = old
         self.assertIn("/health", M.VISION_METADATA_PATHS)
+
+    def test_status_distinguishes_wrapper_from_child_engine_health(self):
+        lane = M.Lane(0, "0", 19086, 262144, Path("lane0.json"), vram_reserve_mib=1200,
+                      process=_AliveProcess())
+        pool = M.LanePool([lane])
+        old = M.lane_engine_alive
+        M.lane_engine_alive = lambda _: False
+        try:
+            status = pool.status()[0]
+        finally:
+            M.lane_engine_alive = old
+        self.assertTrue(status["wrapper_alive"])
+        self.assertFalse(status["alive"])
+        self.assertEqual(status["vram_reserve_mib"], 1200)
+
+    def test_acquire_excludes_wrapper_alive_child_dead_lane(self):
+        lanes = [
+            M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess()),
+            M.Lane(1, "1", 19087, 262144, Path("lane1.json"), process=_AliveProcess()),
+        ]
+        pool = M.LanePool(lanes)
+        old = M.lane_engine_alive
+        M.lane_engine_alive = lambda lane: lane.index == 1
+        try:
+            got = pool.acquire(affinity_key="new-chat")
+        finally:
+            M.lane_engine_alive = old
+        self.assertEqual(got.index, 1)
+        pool.release(got, affinity_key="new-chat")
 
     def test_native_arena_size_matches_arena_expert_source_contract(self):
         with tempfile.TemporaryDirectory() as td:
