@@ -37,6 +37,7 @@ HOP_BY_HOP = {
     "te", "trailer", "transfer-encoding", "upgrade",
 }
 GENERATE_PATHS = {"/v1/chat/completions", "/v1/messages"}
+VISION_METADATA_PATHS = {"/props", "/models", "/v1/models"}
 
 
 def option_value(args: list[str], name: str) -> str | None:
@@ -346,6 +347,13 @@ class LanePool:
             lane.busy = False
             self.cv.notify_all()
 
+    def metadata_lane(self, fallback: Lane) -> Lane:
+        """Advertise pool-wide vision capability through a healthy vision lane when available."""
+        for lane in self.lanes:
+            if lane.vision and lane.process is not None and lane.process.poll() is None:
+                return lane
+        return fallback
+
     def status(self) -> list[dict]:
         return [
             {
@@ -498,7 +506,12 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                     return self._json(411, {"error": {"message": str(e)}})
                 requires_vision = request_has_images(body)
             try:
-                lane = pool.acquire(requires_vision=requires_vision) if leased else lane0
+                if leased:
+                    lane = pool.acquire(requires_vision=requires_vision)
+                elif path in VISION_METADATA_PATHS and self.command in ("GET", "HEAD"):
+                    lane = pool.metadata_lane(lane0)
+                else:
+                    lane = lane0
             except RuntimeError as e:
                 return self._json(503, {"error": {"message": str(e)}})
             try:

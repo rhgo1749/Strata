@@ -106,6 +106,14 @@ class MultiGpuPlanningTests(unittest.TestCase):
         self.assertEqual(got.index, 2)
         pool.release(got)
 
+    def test_metadata_prefers_healthy_vision_lane(self):
+        lanes = [
+            M.Lane(0, "0", 19086, 262144, Path("lane0.json"), vision=False, process=_AliveProcess()),
+            M.Lane(1, "1", 19087, 262144, Path("lane1.json"), vision=True, process=_AliveProcess()),
+        ]
+        pool = M.LanePool(lanes)
+        self.assertEqual(pool.metadata_lane(lanes[0]).index, 1)
+
     def test_native_arena_size_matches_arena_expert_source_contract(self):
         with tempfile.TemporaryDirectory() as td:
             p = Path(td)
