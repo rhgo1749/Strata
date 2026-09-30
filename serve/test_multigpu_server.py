@@ -14,6 +14,11 @@ sys.modules[SPEC.name] = M
 SPEC.loader.exec_module(M)
 
 
+class _AliveProcess:
+    def poll(self):
+        return None
+
+
 class MultiGpuPlanningTests(unittest.TestCase):
     def test_replace_existing_option(self):
         args = ["--pack", "/m", "--max-context", "131072", "--kv", "int8"]
@@ -43,6 +48,63 @@ class MultiGpuPlanningTests(unittest.TestCase):
         self.assertNotIn("--layer-split", got["args"])
         self.assertIn("gpu", cfg)
         self.assertIn("--layer-split", cfg["args"])
+
+    def test_nonvision_lane_drops_encoder_and_vram_reserve(self):
+        cfg = {"vision": {"exe": "/v", "gpu": True},
+               "args": ["--pack", "/m", "--vision", "--vram-reserve-mib", "700", "--max-context", "262144"]}
+        got = M.apply_vision_capability(M.sanitize_lane_config(cfg), False)
+        self.assertNotIn("vision", got)
+        self.assertNotIn("--vision", got["args"])
+        self.assertNotIn("--vram-reserve-mib", got["args"])
+        self.assertIn("vision", cfg)
+
+    def test_vision_lane_keeps_encoder_config(self):
+        cfg = {"vision": {"exe": "/v", "gpu": True},
+               "args": ["--pack", "/m", "--vision", "--vram-reserve-mib", "700"]}
+        got = M.apply_vision_capability(M.sanitize_lane_config(cfg), True)
+        self.assertIn("vision", got)
+        self.assertIn("--vision", got["args"])
+        self.assertIn("--vram-reserve-mib", got["args"])
+
+    def test_parse_vision_lane_indices(self):
+        self.assertEqual(M.parse_lane_indices("1", 3, what="--vision-lanes"), {1})
+        self.assertEqual(M.parse_lane_indices("0,2", 3, what="--vision-lanes"), {0, 2})
+        self.assertEqual(M.parse_lane_indices("none", 3, what="--vision-lanes"), set())
+        with self.assertRaisesRegex(ValueError, "between 0 and 2"):
+            M.parse_lane_indices("3", 3, what="--vision-lanes")
+
+    def test_detect_supported_image_message_parts(self):
+        openai = b'{"messages":[{"role":"user","content":[{"type":"text","text":"look"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]}]}'
+        anthropic = b'{"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}}]}]}'
+        text = b'{"messages":[{"role":"user","content":"hello"}]}'
+        self.assertTrue(M.request_has_images(openai))
+        self.assertTrue(M.request_has_images(anthropic))
+        self.assertFalse(M.request_has_images(text))
+        self.assertFalse(M.request_has_images(b"not-json"))
+
+    def test_vision_request_uses_only_vision_lane(self):
+        lanes = [
+            M.Lane(0, "0", 19086, 262144, Path("lane0.json"), vision=False, process=_AliveProcess()),
+            M.Lane(1, "1", 19087, 262144, Path("lane1.json"), vision=True, process=_AliveProcess()),
+            M.Lane(2, "2", 19088, 262144, Path("lane2.json"), vision=False, process=_AliveProcess()),
+        ]
+        pool = M.LanePool(lanes)
+        got = pool.acquire(requires_vision=True)
+        self.assertEqual(got.index, 1)
+        pool.release(got)
+
+    def test_text_request_yields_vision_lane_to_waiting_image(self):
+        lanes = [
+            M.Lane(0, "0", 19086, 262144, Path("lane0.json"), vision=False, process=_AliveProcess()),
+            M.Lane(1, "1", 19087, 262144, Path("lane1.json"), vision=True, process=_AliveProcess()),
+            M.Lane(2, "2", 19088, 262144, Path("lane2.json"), vision=False, process=_AliveProcess()),
+        ]
+        pool = M.LanePool(lanes)
+        pool.cursor = 1
+        pool.vision_waiters = 1
+        got = pool.acquire()
+        self.assertEqual(got.index, 2)
+        pool.release(got)
 
     def test_native_arena_size_matches_arena_expert_source_contract(self):
         with tempfile.TemporaryDirectory() as td:

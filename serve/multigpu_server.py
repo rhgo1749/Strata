@@ -20,7 +20,6 @@ import hashlib
 import http.client
 import json
 import os
-import queue
 import re
 import signal
 import subprocess
@@ -74,6 +73,11 @@ def remove_option(args: list[str], name: str) -> list[str]:
     return out
 
 
+def remove_flag(args: list[str], name: str) -> list[str]:
+    """Remove every standalone flag occurrence."""
+    return [arg for arg in args if arg != name]
+
+
 def sanitize_lane_config(cfg: dict) -> dict:
     """Return a lane-local config that cannot re-expand itself into upstream layer-split mode."""
     lane_cfg = copy.deepcopy(cfg)
@@ -81,6 +85,17 @@ def sanitize_lane_config(cfg: dict) -> dict:
     lane_cfg.pop("layer_split", None)
     if isinstance(lane_cfg.get("args"), list):
         lane_cfg["args"] = remove_option(lane_cfg["args"], "--layer-split")
+    return lane_cfg
+
+
+def apply_vision_capability(lane_cfg: dict, enabled: bool) -> dict:
+    """Strip encoder config and its reserved VRAM from lanes that are not vision-capable."""
+    if enabled or not lane_cfg.get("vision"):
+        return lane_cfg
+    lane_cfg.pop("vision", None)
+    if isinstance(lane_cfg.get("args"), list):
+        lane_cfg["args"] = remove_flag(lane_cfg["args"], "--vision")
+        lane_cfg["args"] = remove_option(lane_cfg["args"], "--vram-reserve-mib")
     return lane_cfg
 
 
@@ -144,6 +159,43 @@ def parse_float_list(text: str, *, what: str) -> list[float]:
     if not values or any(v < 0.0 or v > 1.0 for v in values):
         raise ValueError(f"{what} values must be between 0 and 1")
     return values
+
+
+def parse_lane_indices(text: str, lanes: int, *, what: str) -> set[int]:
+    if text.strip().lower() == "none":
+        return set()
+    try:
+        values = [int(x.strip()) for x in text.split(",") if x.strip()]
+    except ValueError as e:
+        raise ValueError(f"{what} must be a comma-separated lane-index list or 'none'") from e
+    if not values:
+        raise ValueError(f"{what} must name at least one lane or 'none'")
+    if len(set(values)) != len(values):
+        raise ValueError(f"{what} must not contain duplicate lane indices")
+    if any(v < 0 or v >= lanes for v in values):
+        raise ValueError(f"{what} lane indices must be between 0 and {lanes - 1}")
+    return set(values)
+
+
+def request_has_images(body: bytes) -> bool:
+    """Classify supported OpenAI/Anthropic message bodies without interpreting image contents."""
+    try:
+        req = json.loads(body) if body else {}
+    except (TypeError, ValueError):
+        return False
+    messages = req.get("messages") if isinstance(req, dict) else None
+    if not isinstance(messages, list):
+        return False
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if isinstance(part, dict) and part.get("type") in ("image_url", "image"):
+                return True
+    return False
 
 
 def lane_contexts(base_context: int, lanes: int, requested: str | None, kv_budget: int | None) -> list[int]:
@@ -250,6 +302,7 @@ class Lane:
     cpus: tuple[int, ...] | None = None
     pcie_frac: float | None = None
     kv_resident: int | None = None
+    vision: bool = False
     process: subprocess.Popen | None = None
     busy: bool = False
 
@@ -257,29 +310,41 @@ class Lane:
 class LanePool:
     def __init__(self, lanes: list[Lane]):
         self.lanes = lanes
-        self.free: queue.Queue[Lane] = queue.Queue()
-        self.lock = threading.Lock()
-        for lane in lanes:
-            self.free.put(lane)
+        self.cv = threading.Condition()
+        self.cursor = 0
+        self.vision_waiters = 0
 
-    def acquire(self) -> Lane:
-        while True:
-            if not any(x.process is not None and x.process.poll() is None for x in self.lanes):
-                raise RuntimeError("all GPU lanes have stopped")
+    def acquire(self, *, requires_vision: bool = False) -> Lane:
+        with self.cv:
+            if requires_vision:
+                self.vision_waiters += 1
             try:
-                lane = self.free.get(timeout=1.0)
-            except queue.Empty:
-                continue
-            if lane.process is not None and lane.process.poll() is None:
-                with self.lock:
-                    lane.busy = True
-                return lane
+                while True:
+                    alive = [x for x in self.lanes if x.process is not None and x.process.poll() is None]
+                    if not alive:
+                        raise RuntimeError("all GPU lanes have stopped")
+                    eligible = [x for x in alive if not requires_vision or x.vision]
+                    if not eligible:
+                        raise RuntimeError("no vision-capable GPU lanes are running")
+                    for offset in range(len(self.lanes)):
+                        idx = (self.cursor + offset) % len(self.lanes)
+                        lane = self.lanes[idx]
+                        if lane not in eligible or lane.busy:
+                            continue
+                        if not requires_vision and lane.vision and self.vision_waiters:
+                            continue
+                        lane.busy = True
+                        self.cursor = (idx + 1) % len(self.lanes)
+                        return lane
+                    self.cv.wait(timeout=1.0)
+            finally:
+                if requires_vision:
+                    self.vision_waiters -= 1
 
     def release(self, lane: Lane) -> None:
-        with self.lock:
+        with self.cv:
             lane.busy = False
-        if lane.process is not None and lane.process.poll() is None:
-            self.free.put(lane)
+            self.cv.notify_all()
 
     def status(self) -> list[dict]:
         return [
@@ -291,6 +356,7 @@ class LanePool:
                 "cpus": list(x.cpus) if x.cpus else None,
                 "pcie_frac": x.pcie_frac,
                 "kv_resident": x.kv_resident,
+                "vision": x.vision,
                 "pid": x.process.pid if x.process else None,
                 "alive": bool(x.process and x.process.poll() is None),
                 "busy": x.busy,
@@ -360,7 +426,7 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
         def _slots(self):
             self._json(200, [
                 {"id": lane.index, "n_ctx": lane.context,
-                 "is_processing": lane.busy, "gpu": lane.gpu}
+                 "is_processing": lane.busy, "gpu": lane.gpu, "vision": lane.vision}
                 for lane in pool.lanes if lane.process is not None and lane.process.poll() is None
             ])
 
@@ -370,11 +436,12 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
             n = int(self.headers.get("Content-Length", "0") or 0)
             return self.rfile.read(n) if n else b""
 
-        def _proxy(self, lane: Lane):
-            try:
-                body = self._body()
-            except ValueError as e:
-                return self._json(411, {"error": {"message": str(e)}})
+        def _proxy(self, lane: Lane, body: bytes | None = None):
+            if body is None:
+                try:
+                    body = self._body()
+                except ValueError as e:
+                    return self._json(411, {"error": {"message": str(e)}})
 
             headers = {
                 k: v for k, v in self.headers.items()
@@ -422,14 +489,22 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
             if reject_generate_proxy and path in GENERATE_PATHS and self.command == "POST":
                 return self._json(503, {"error": {"message": "benchmark isolation: public generation disabled"}})
             leased = path in GENERATE_PATHS and self.command == "POST"
+            body = None
+            requires_vision = False
+            if leased:
+                try:
+                    body = self._body()
+                except ValueError as e:
+                    return self._json(411, {"error": {"message": str(e)}})
+                requires_vision = request_has_images(body)
             try:
-                lane = pool.acquire() if leased else lane0
+                lane = pool.acquire(requires_vision=requires_vision) if leased else lane0
             except RuntimeError as e:
                 return self._json(503, {"error": {"message": str(e)}})
             try:
                 if lane.process is None or lane.process.poll() is not None:
                     return self._json(503, {"error": {"message": f"GPU lane {lane.index} is not running"}})
-                self._proxy(lane)
+                self._proxy(lane, body=body)
             finally:
                 if leased:
                     pool.release(lane)
@@ -474,6 +549,8 @@ def main() -> int:
                     help="per-lane --pcie-frac values, e.g. 0.55,0.30,0.55")
     ap.add_argument("--lane-kv-residents",
                     help="per-lane --kv-resident token counts, e.g. 65536,32768,32768")
+    ap.add_argument("--vision-lanes",
+                    help="0-based lane indices allowed to serve images, e.g. 1 or 0,2; defaults to lane 0 when vision is configured")
     ap.add_argument("--private-arena", action="store_true",
                     help="benchmark only: use the normal private expert arena in each lane")
     ap.add_argument("--reject-generate-proxy", action="store_true",
@@ -490,6 +567,15 @@ def main() -> int:
     gpus = [x.strip() for x in a.gpus.split(",") if x.strip()]
     if not gpus or len(set(gpus)) != len(gpus):
         ap.error("--gpus must contain unique GPU ids")
+    try:
+        if a.vision_lanes is not None:
+            vision_lanes = parse_lane_indices(a.vision_lanes, len(gpus), what="--vision-lanes")
+            if vision_lanes and not cfg.get("vision"):
+                raise ValueError("--vision-lanes requires a base config with a vision entry")
+        else:
+            vision_lanes = {0} if cfg.get("vision") else set()
+    except ValueError as e:
+        ap.error(str(e))
     base_ctx_raw = option_value(cfg["args"], "--max-context")
     if base_ctx_raw is None:
         ap.error("base config has no --max-context")
@@ -553,6 +639,8 @@ def main() -> int:
     lanes: list[Lane] = []
     for i, (gpu, ctx) in enumerate(zip(gpus, contexts)):
         lane_cfg = sanitize_lane_config(cfg)
+        lane_vision = i in vision_lanes
+        lane_cfg = apply_vision_capability(lane_cfg, lane_vision)
         lane_cfg["args"] = replace_option(lane_cfg["args"], "--max-context", ctx)
         if pcie_fracs[i] is not None:
             lane_cfg["args"] = replace_option(lane_cfg["args"], "--pcie-frac", pcie_fracs[i])
@@ -566,7 +654,7 @@ def main() -> int:
             lane_cfg["log"] = str(state_dir / f"lane-{i}-gpu{gpu}.log")
         lane_config = state_dir / f"lane-{i}-gpu{gpu}.json"
         lane_config.write_text(json.dumps(lane_cfg, indent=1), encoding="utf-8")
-        lanes.append(Lane(i, gpu, a.base_port + i, ctx, lane_config, cpu_sets[i], pcie_fracs[i], kv_residents[i]))
+        lanes.append(Lane(i, gpu, a.base_port + i, ctx, lane_config, cpu_sets[i], pcie_fracs[i], kv_residents[i], lane_vision))
 
     print(
         f"[strata-multigpu] {len(lanes)} lanes; context capacities {contexts} "
@@ -574,6 +662,12 @@ def main() -> int:
         flush=True,
     )
     print(f"[strata-multigpu] arena backing: {arena_file} ({spec.bytes:,} bytes)", flush=True)
+    if vision_lanes:
+        print(
+            "[strata-multigpu] vision lanes: " +
+            ", ".join(f"lane {x.index}=GPU{x.gpu}" for x in lanes if x.vision),
+            flush=True,
+        )
     if any(x.cpus for x in lanes):
         print(
             "[strata-multigpu] CPU partitions: " +
