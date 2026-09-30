@@ -1,4 +1,7 @@
-<h1 align="center">Strata</h1>
+<h1 align="center">Strata-Lanes</h1>
+
+<p align="center"><b>Downstream multi-lane fork of <a href="https://github.com/Niko1221/Strata">Niko1221/Strata</a>.</b><br>
+Upstream Strata is created and maintained by Niko1221; this fork carries the GPU-per-lane / shared-arena extensions.</p>
 
 <p align="center"><b>Run a 125-billion-parameter AI model on a normal gaming PC</b><br>
 one NVIDIA card (12-24 GB) + 64 GB of RAM · Windows or Linux · one click to install</p>
