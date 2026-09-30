@@ -37,7 +37,7 @@ HOP_BY_HOP = {
     "te", "trailer", "transfer-encoding", "upgrade",
 }
 GENERATE_PATHS = {"/v1/chat/completions", "/v1/messages"}
-VISION_METADATA_PATHS = {"/props", "/models", "/v1/models"}
+VISION_METADATA_PATHS = {"/health", "/props", "/models", "/v1/models"}
 
 
 def option_value(args: list[str], name: str) -> str | None:

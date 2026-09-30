@@ -113,6 +113,7 @@ class MultiGpuPlanningTests(unittest.TestCase):
         ]
         pool = M.LanePool(lanes)
         self.assertEqual(pool.metadata_lane(lanes[0]).index, 1)
+        self.assertIn("/health", M.VISION_METADATA_PATHS)
 
     def test_native_arena_size_matches_arena_expert_source_contract(self):
         with tempfile.TemporaryDirectory() as td:
