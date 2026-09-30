@@ -64,15 +64,17 @@ GPU-resident KV is also per lane. Increasing it can displace the GPU hot-expert 
 
 The production parallelism unit is a whole request or session, not a token, tensor, layer, or expert. This avoids mandatory cross-GPU communication in the normal decode path and preserves comparatively small failure domains.
 
-The supervisor prefers explicit `X-Strata-Session-Id`, conversation/session/thread identifiers in the request, and otherwise derives a privacy-safe best-effort key from the first user message. Once a session owns an eligible lane, a later turn waits for that lane when it is busy rather than spilling to another GPU and forcing a full prompt reread. New sessions prefer unbound lanes before replacing an older affinity. Requests with no derivable key keep the ordinary free-lane behavior.
+The supervisor prefers explicit `X-Strata-Session-Id`, conversation/session/thread identifiers in the request, and otherwise derives a privacy-safe best-effort key from the first user message. It keeps a bounded LRU mapping from session keys to lane indices, so several conversations may remain associated with the same engine and use Strata's per-engine prompt-cache checkpoints. A later turn waits for its remembered lane when that lane is busy rather than spilling to another GPU and forcing a full prompt reread. A genuinely new session prefers an eligible lane with no live conversation; otherwise it overwrites the lane with the smallest currently live request state, then the least recently used live state, with the rotating cursor as the final fairness tie-breaker. This policy is lane/GPU agnostic: no GPU index, model, or PCIe-width preference is hard-coded. Using a lane for another conversation does not erase older session-to-lane mappings. Requests with no derivable key keep the ordinary free-lane behavior.
+
+If every eligible lane is busy, a new session waits until one request/stream fully releases its lane; the scheduler never inserts work into an already-busy lane. Busy lifetime is request/stream scoped, while affinity lifetime is session scoped.
 
 The trade-off is explicit: preserving a live session can leave another GPU idle briefly or add queueing behind that session's lane. That is preferable to repeatedly paying long-context prefill for the same conversation. More tightly coupled multi-GPU designs remain roadmap challengers and must demonstrate an end-to-end win before promotion.
 
 ## Current promoted engine baseline
 
-The shared-lane runtime has been revalidated after syncing upstream Strata **0.1.26** in merge commit `44b8221`. The 3-lane launch contract remains unchanged: one engine per GPU, 262144 context and 32768 resident KV per lane on the reference host, disjoint CPU partitions, per-lane PCIe tuning, and one shared expert arena.
+The shared-lane runtime is currently based on upstream Strata **0.1.27**. The 3-lane launch contract remains unchanged: one engine per GPU, 262144 context and 32768 resident KV per lane on the reference host, disjoint CPU partitions, per-lane PCIe tuning, and one shared expert arena.
 
-The 0.1.26 promotion passed the CUDA release build, upstream `file_expert_source_test`, and 79 server/multi-GPU tests (3 skipped). A real 3-lane IQ3_S smoke run then started all three 262K lanes successfully and served three concurrent requests through the supervisor. All lane mappings resolved to the same 50,294,988,800-byte `/dev/shm` backing object with the shared arena reported as `Shared_Dirty` and no private dirty copy per lane. The supervisor continues to strip inherited `gpu` / `layer_split` settings from lane configs so an upstream multi-GPU config cannot accidentally re-expand a lane into layer-split mode.
+The 0.1.27 promotion preserved the CUDA/shared-arena path and the supervisor continues to strip inherited `gpu` / `layer_split` settings from lane configs so an upstream multi-GPU config cannot accidentally re-expand a lane into layer-split mode. Post-paper serving hardening adds multi-session lane affinity and live-state-aware placement without changing the engine execution model.
 
 Adaptive hot-expert replacement remains engine-local to each lane. Optional `STRATA_ADAPT_TRACE` instrumentation records first routed misses, adaptive swap selection/publication, and the first later GPU-resident hit without changing the default serving path when tracing is disabled. Reference-host timing and A/B results live in the public recipe repository.
 
@@ -89,5 +91,5 @@ Current boundaries:
 3. Source expert loading is still repeated during sequential lane startup.
 4. Hot-expert caches are lane-local; there is no required cross-GPU ownership scheme.
 5. The supervisor is focused on generation serving and may route other endpoints through one lane.
-6. Session affinity is only as strong as the available identity. Explicit session/conversation/thread IDs are authoritative; the first-user-message fallback is best effort and can be replaced when more active sessions exist than lanes.
+6. Session affinity is only as strong as the available identity. Explicit session/conversation/thread IDs are authoritative; the first-user-message fallback is best effort and can change if a client rewrites or compacts away the first user turn.
 7. Context lengths beyond the model/runtime's validated range remain experimental.

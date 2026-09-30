@@ -129,11 +129,11 @@ class MultiGpuPlanningTests(unittest.TestCase):
 
     def test_affinity_waits_for_its_busy_lane_instead_of_spilling(self):
         lanes = [
-            M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess(),
-                   busy=True, affinity_key="chat-a"),
+            M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess(), busy=True),
             M.Lane(1, "1", 19087, 262144, Path("lane1.json"), process=_AliveProcess()),
         ]
         pool = M.LanePool(lanes)
+        pool.affinity["chat-a"] = 0
         pool.cursor = 1
         started = threading.Event()
         result = []
@@ -153,29 +153,119 @@ class MultiGpuPlanningTests(unittest.TestCase):
         self.assertEqual(result[0].index, 0)
         pool.release(result[0])
 
-    def test_new_affinity_prefers_an_unbound_lane(self):
+    def test_new_session_waits_when_all_lanes_busy(self):
         lanes = [
-            M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess(), affinity_key="chat-a"),
-            M.Lane(1, "1", 19087, 262144, Path("lane1.json"), process=_AliveProcess()),
-            M.Lane(2, "2", 19088, 262144, Path("lane2.json"), process=_AliveProcess(), affinity_key="chat-b"),
+            M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess(), busy=True,
+                   live_affinity_key="a", live_request_bytes=200000),
+            M.Lane(1, "1", 19087, 262144, Path("lane1.json"), process=_AliveProcess(), busy=True,
+                   live_affinity_key="b", live_request_bytes=60000),
+            M.Lane(2, "2", 19088, 262144, Path("lane2.json"), process=_AliveProcess(), busy=True,
+                   live_affinity_key="c", live_request_bytes=700),
         ]
         pool = M.LanePool(lanes)
-        got = pool.acquire(affinity_key="chat-c")
+        started = threading.Event()
+        result = []
+
+        def acquire():
+            started.set()
+            result.append(pool.acquire(affinity_key="new-chat", request_bytes=500))
+
+        thread = threading.Thread(target=acquire)
+        thread.start()
+        self.assertTrue(started.wait(1.0))
+        time.sleep(0.05)
+        self.assertTrue(thread.is_alive())
+        pool.release(lanes[1], affinity_key="b", request_bytes=60000)
+        thread.join(1.0)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result[0].index, 1)
+        pool.release(result[0], affinity_key="new-chat", request_bytes=500)
+
+    def test_new_session_prefers_empty_live_lane(self):
+        lanes = [
+            M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess(),
+                   live_affinity_key="long", live_request_bytes=200000),
+            M.Lane(1, "1", 19087, 262144, Path("lane1.json"), process=_AliveProcess()),
+            M.Lane(2, "2", 19088, 262144, Path("lane2.json"), process=_AliveProcess(),
+                   live_affinity_key="medium", live_request_bytes=60000),
+        ]
+        pool = M.LanePool(lanes)
+        got = pool.acquire(affinity_key="new-chat", request_bytes=500)
         self.assertEqual(got.index, 1)
-        self.assertEqual(got.affinity_key, "chat-c")
-        pool.release(got)
+        pool.release(got, affinity_key="new-chat", request_bytes=500)
+
+    def test_new_session_prefers_smallest_live_state_without_lane_hardcoding(self):
+        lanes = [
+            M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess(),
+                   live_affinity_key="long", live_request_bytes=200000),
+            M.Lane(1, "1", 19087, 262144, Path("lane1.json"), process=_AliveProcess(),
+                   live_affinity_key="medium", live_request_bytes=60000),
+            M.Lane(2, "2", 19088, 262144, Path("lane2.json"), process=_AliveProcess(),
+                   live_affinity_key="short", live_request_bytes=700),
+        ]
+        pool = M.LanePool(lanes)
+        got = pool.acquire(affinity_key="new-chat", request_bytes=500)
+        self.assertEqual(got.index, 2)
+        pool.release(got, affinity_key="new-chat", request_bytes=500)
+
+    def test_equal_live_states_use_rotating_candidate_order(self):
+        lanes = [
+            M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess(),
+                   live_affinity_key="a", live_request_bytes=1000),
+            M.Lane(1, "1", 19087, 262144, Path("lane1.json"), process=_AliveProcess(),
+                   live_affinity_key="b", live_request_bytes=1000),
+            M.Lane(2, "2", 19088, 262144, Path("lane2.json"), process=_AliveProcess(),
+                   live_affinity_key="c", live_request_bytes=1000),
+        ]
+        pool = M.LanePool(lanes)
+        pool.cursor = 1
+        got = pool.acquire(affinity_key="new-chat", request_bytes=500)
+        self.assertEqual(got.index, 1)
+        pool.release(got, affinity_key="new-chat", request_bytes=500)
+
+    def test_other_session_does_not_erase_existing_lane_affinity(self):
+        lanes = [
+            M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess()),
+            M.Lane(1, "1", 19087, 262144, Path("lane1.json"), process=_AliveProcess()),
+            M.Lane(2, "2", 19088, 262144, Path("lane2.json"), process=_AliveProcess()),
+        ]
+        pool = M.LanePool(lanes)
+        first = pool.acquire(affinity_key="long-chat", request_bytes=200000)
+        self.assertEqual(first.index, 0)
+        pool.release(first, affinity_key="long-chat", request_bytes=200000)
+        for key, size in (("chat-b", 60000), ("chat-c", 700)):
+            lane = pool.acquire(affinity_key=key, request_bytes=size)
+            pool.release(lane, affinity_key=key, request_bytes=size)
+        lane = pool.acquire(affinity_key="short-chat", request_bytes=500)
+        self.assertEqual(lane.index, 2)
+        pool.release(lane, affinity_key="short-chat", request_bytes=500)
+        self.assertEqual(pool.affinity["long-chat"], 0)
+        again = pool.acquire(affinity_key="long-chat", request_bytes=201000)
+        self.assertEqual(again.index, 0)
+        pool.release(again, affinity_key="long-chat", request_bytes=201000)
+
+    def test_affinity_lru_is_bounded(self):
+        lanes = [
+            M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess()),
+            M.Lane(1, "1", 19087, 262144, Path("lane1.json"), process=_AliveProcess()),
+        ]
+        pool = M.LanePool(lanes, max_affinity_entries=3)
+        for key in ("a", "b", "c", "d"):
+            lane = pool.acquire(affinity_key=key)
+            pool.release(lane)
+        self.assertNotIn("a", pool.affinity)
+        self.assertEqual(set(pool.affinity), {"b", "c", "d"})
 
     def test_vision_request_rebinds_affinity_to_a_vision_lane(self):
         lanes = [
-            M.Lane(0, "0", 19086, 262144, Path("lane0.json"), vision=False, process=_AliveProcess(),
-                   affinity_key="chat-a"),
+            M.Lane(0, "0", 19086, 262144, Path("lane0.json"), vision=False, process=_AliveProcess()),
             M.Lane(1, "1", 19087, 262144, Path("lane1.json"), vision=True, process=_AliveProcess()),
         ]
         pool = M.LanePool(lanes)
+        pool.affinity["chat-a"] = 0
         got = pool.acquire(requires_vision=True, affinity_key="chat-a")
         self.assertEqual(got.index, 1)
-        self.assertIsNone(lanes[0].affinity_key)
-        self.assertEqual(lanes[1].affinity_key, "chat-a")
+        self.assertEqual(pool.affinity["chat-a"], 1)
         pool.release(got)
 
     def test_metadata_prefers_healthy_vision_lane(self):

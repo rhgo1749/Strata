@@ -27,6 +27,7 @@ import sys
 import threading
 import time
 import urllib.request
+from collections import OrderedDict
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -353,17 +354,34 @@ class Lane:
     vision: bool = False
     process: subprocess.Popen | None = None
     busy: bool = False
-    affinity_key: str | None = None
+    live_affinity_key: str | None = None
+    live_request_bytes: int = 0
+    live_sequence: int = 0
 
 
 class LanePool:
-    def __init__(self, lanes: list[Lane]):
+    def __init__(self, lanes: list[Lane], *, max_affinity_entries: int | None = None):
         self.lanes = lanes
         self.cv = threading.Condition()
         self.cursor = 0
         self.vision_waiters = 0
+        self.max_affinity_entries = max_affinity_entries or max(16, len(lanes) * 8)
+        self.affinity: OrderedDict[str, int] = OrderedDict()
+        self.sequence = 0
 
-    def acquire(self, *, requires_vision: bool = False, affinity_key: str | None = None) -> Lane:
+    def _remember_affinity(self, key: str, lane_index: int) -> None:
+        self.affinity[key] = lane_index
+        self.affinity.move_to_end(key)
+        while len(self.affinity) > self.max_affinity_entries:
+            self.affinity.popitem(last=False)
+
+    def _drop_dead_affinity(self, alive_indices: set[int]) -> None:
+        for key, lane_index in list(self.affinity.items()):
+            if lane_index not in alive_indices:
+                del self.affinity[key]
+
+    def acquire(self, *, requires_vision: bool = False, affinity_key: str | None = None,
+                request_bytes: int = 0) -> Lane:
         with self.cv:
             if requires_vision:
                 self.vision_waiters += 1
@@ -372,18 +390,24 @@ class LanePool:
                     alive = [x for x in self.lanes if x.process is not None and x.process.poll() is None]
                     if not alive:
                         raise RuntimeError("all GPU lanes have stopped")
+                    alive_indices = {x.index for x in alive}
+                    self._drop_dead_affinity(alive_indices)
                     eligible = [x for x in alive if not requires_vision or x.vision]
                     if not eligible:
                         raise RuntimeError("no vision-capable GPU lanes are running")
 
-                    # A conversation that still owns an eligible lane waits for that lane instead
-                    # of spilling to a free GPU and throwing away its lane-local KV/checkpoints.
-                    if affinity_key is not None:
-                        preferred = next((x for x in eligible if x.affinity_key == affinity_key), None)
-                        if preferred is not None:
+                    # Preserve a session's lane even when other sessions have used that engine in
+                    # between. Strata's per-engine prompt-cache checkpoints can then restore the
+                    # earlier conversation instead of forcing a cross-lane full prefill.
+                    if affinity_key is not None and affinity_key in self.affinity:
+                        preferred = self.lanes[self.affinity[affinity_key]]
+                        if requires_vision and not preferred.vision:
+                            del self.affinity[affinity_key]
+                        else:
                             if preferred.busy or (not requires_vision and preferred.vision and self.vision_waiters):
                                 self.cv.wait(timeout=1.0)
                                 continue
+                            self.affinity.move_to_end(affinity_key)
                             preferred.busy = True
                             return preferred
 
@@ -397,16 +421,21 @@ class LanePool:
                             continue
                         candidates.append((idx, lane))
                     if candidates:
-                        # Keep existing sessions undisturbed when an unused lane is available.
-                        idx, lane = next((pair for pair in candidates if pair[1].affinity_key is None), candidates[0])
+                        # New-session placement is lexicographic and hardware-agnostic:
+                        # 1) empty live slot, 2) smallest live request state, 3) least recently used
+                        # live state. Candidate order already follows the rotating cursor, which is
+                        # the final fairness tie-breaker. Remembered affinity mappings survive an
+                        # overwrite so older sessions can return and restore prompt checkpoints.
+                        idx, lane = min(
+                            candidates,
+                            key=lambda pair: (
+                                0 if pair[1].live_affinity_key is None else 1,
+                                pair[1].live_request_bytes,
+                                pair[1].live_sequence,
+                            ),
+                        )
                         if affinity_key is not None:
-                            for other in self.lanes:
-                                if other is not lane and other.affinity_key == affinity_key:
-                                    other.affinity_key = None
-                            lane.affinity_key = affinity_key
-                        else:
-                            # An unidentifiable request may rewrite this engine's conversation state.
-                            lane.affinity_key = None
+                            self._remember_affinity(affinity_key, lane.index)
                         lane.busy = True
                         self.cursor = (idx + 1) % len(self.lanes)
                         return lane
@@ -415,8 +444,12 @@ class LanePool:
                 if requires_vision:
                     self.vision_waiters -= 1
 
-    def release(self, lane: Lane) -> None:
+    def release(self, lane: Lane, *, affinity_key: str | None = None, request_bytes: int = 0) -> None:
         with self.cv:
+            self.sequence += 1
+            lane.live_affinity_key = affinity_key
+            lane.live_request_bytes = max(0, request_bytes)
+            lane.live_sequence = self.sequence
             lane.busy = False
             self.cv.notify_all()
 
@@ -441,7 +474,10 @@ class LanePool:
                 "pid": x.process.pid if x.process else None,
                 "alive": bool(x.process and x.process.poll() is None),
                 "busy": x.busy,
-                "affinity": x.affinity_key[:12] if x.affinity_key else None,
+                "affinity_sessions": sum(1 for lane_index in self.affinity.values() if lane_index == x.index),
+                "live_session": x.live_affinity_key[:12] if x.live_affinity_key else None,
+                "live_request_bytes": x.live_request_bytes,
+                "live_sequence": x.live_sequence,
             }
             for x in self.lanes
         ]
@@ -583,7 +619,11 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                 affinity_key = request_affinity_key(body, self.headers)
             try:
                 if leased:
-                    lane = pool.acquire(requires_vision=requires_vision, affinity_key=affinity_key)
+                    lane = pool.acquire(
+                        requires_vision=requires_vision,
+                        affinity_key=affinity_key,
+                        request_bytes=len(body or b""),
+                    )
                 elif path in VISION_METADATA_PATHS and self.command in ("GET", "HEAD"):
                     lane = pool.metadata_lane(lane0)
                 else:
@@ -596,7 +636,7 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                 self._proxy(lane, body=body)
             finally:
                 if leased:
-                    pool.release(lane)
+                    pool.release(lane, affinity_key=affinity_key, request_bytes=len(body or b""))
 
         do_GET = _dispatch
         do_HEAD = _dispatch
