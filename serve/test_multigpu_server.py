@@ -121,6 +121,79 @@ class MultiGpuPlanningTests(unittest.TestCase):
         sock.close()
         M.require_ports_free("127.0.0.1", [port, 0])
 
+    def test_benchmark_trace_records_exact_lane_lease_and_headers(self):
+        class Backend(M.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, fmt, *args):
+                pass
+
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length", "0") or 0)
+                if n:
+                    self.rfile.read(n)
+                body = b'{"ok":true}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        backend = M.ThreadingHTTPServer(("127.0.0.1", 0), Backend)
+        backend_thread = threading.Thread(target=backend.serve_forever, daemon=True)
+        backend_thread.start()
+        lane = M.Lane(0, "0", backend.server_address[1], 32768, Path("lane.json"), process=_AliveProcess())
+        pool = M.LanePool([lane])
+
+        with tempfile.TemporaryDirectory() as td:
+            trace_path = Path(td) / "leases.jsonl"
+            trace = M.BenchmarkTrace(trace_path)
+            handler = M.make_handler(pool, lane, Path("/dev/shm/fake.bin"), 123, None, bench_trace=trace)
+            proxy = M.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            proxy_thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+            proxy_thread.start()
+            try:
+                conn = M.http.client.HTTPConnection("127.0.0.1", proxy.server_address[1], timeout=2)
+                body = b'{"messages":[{"role":"user","content":"hi"}]}'
+                conn.request(
+                    "POST", "/v1/chat/completions", body=body,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Content-Length": str(len(body)),
+                        "X-Strata-Benchmark-Run-Id": "run-a",
+                        "X-Strata-Benchmark-Request-Id": "req-3",
+                        "X-Strata-Benchmark-Submit-Rank": "3",
+                    },
+                )
+                resp = conn.getresponse()
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(resp.getheader("X-Strata-Lane-Index"), "0")
+                self.assertEqual(resp.getheader("X-Strata-Admission-Rank"), "0")
+                self.assertEqual(resp.getheader("X-Strata-Benchmark-Request-Id"), "req-3")
+                self.assertGreaterEqual(float(resp.getheader("X-Strata-Queue-Wait-Ms")), 0.0)
+                self.assertEqual(resp.read(), b'{"ok":true}')
+                conn.close()
+            finally:
+                proxy.shutdown()
+                proxy.server_close()
+                backend.shutdown()
+                backend.server_close()
+                proxy_thread.join(1.0)
+                backend_thread.join(1.0)
+
+            records = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(len(records), 1)
+            rec = records[0]
+            self.assertEqual(rec["run_id"], "run-a")
+            self.assertEqual(rec["request_id"], "req-3")
+            self.assertEqual(rec["submit_rank"], "3")
+            self.assertEqual(rec["admission_rank"], 0)
+            self.assertEqual(rec["lane_index"], 0)
+            self.assertGreaterEqual(rec["queue_wait_ms"], 0.0)
+            self.assertGreaterEqual(rec["service_ms"], 0.0)
+            self.assertLessEqual(rec["queue_enter_unix_ns"], rec["admitted_unix_ns"])
+            self.assertLessEqual(rec["admitted_unix_ns"], rec["released_unix_ns"])
+
     def test_parse_vision_lane_indices(self):
         self.assertEqual(M.parse_lane_indices("1", 3, what="--vision-lanes"), {1})
         self.assertEqual(M.parse_lane_indices("0,2", 3, what="--vision-lanes"), {0, 2})

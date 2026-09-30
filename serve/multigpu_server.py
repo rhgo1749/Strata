@@ -373,6 +373,21 @@ class Lane:
     live_sequence: int = 0
 
 
+class BenchmarkTrace:
+    """Append exact supervisor lease timings without changing normal serving behavior."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.lock = threading.Lock()
+
+    def write(self, record: dict) -> None:
+        line = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+        with self.lock:
+            with self.path.open("a", encoding="utf-8") as f:
+                f.write(line)
+
+
 def lane_engine_alive(lane: Lane, timeout: float = 0.2) -> bool:
     """Return whether both the lane wrapper and its child engine currently expose the model."""
     if lane.process is None or lane.process.poll() is not None:
@@ -616,7 +631,26 @@ def stop_lane(lane: Lane) -> None:
 
 
 def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int, kv_budget: int | None,
-                 reject_generate_proxy: bool = False):
+                 reject_generate_proxy: bool = False, bench_trace: BenchmarkTrace | None = None):
+    counter_lock = threading.Lock()
+    request_counter = 0
+    admission_counter = 0
+
+    def next_request_id(explicit: str | None) -> str:
+        nonlocal request_counter
+        if explicit:
+            return explicit
+        with counter_lock:
+            request_counter += 1
+            return f"auto-{request_counter}"
+
+    def next_admission_rank() -> int:
+        nonlocal admission_counter
+        with counter_lock:
+            rank = admission_counter
+            admission_counter += 1
+            return rank
+
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -641,6 +675,7 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                 "kv_budget": kv_budget,
                 "lane_context_total": sum(x.context for x in pool.lanes),
                 "queue_depth": pool.queue_depth(),
+                "bench_trace_jsonl": str(bench_trace.path) if bench_trace else None,
                 "lanes": pool.status(),
             })
 
@@ -657,7 +692,7 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
             n = int(self.headers.get("Content-Length", "0") or 0)
             return self.rfile.read(n) if n else b""
 
-        def _proxy(self, lane: Lane, body: bytes | None = None):
+        def _proxy(self, lane: Lane, body: bytes | None = None, extra_headers: dict[str, str] | None = None):
             if body is None:
                 try:
                     body = self._body()
@@ -673,6 +708,8 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                 conn.request(self.command, self.path, body=body, headers=headers)
                 resp = conn.getresponse()
                 self.send_response(resp.status, resp.reason)
+                for k, v in (extra_headers or {}).items():
+                    self.send_header(k, v)
                 has_length = False
                 for k, v in resp.getheaders():
                     lk = k.lower()
@@ -713,6 +750,15 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
             body = None
             requires_vision = False
             affinity_key = None
+            request_id = None
+            run_id = None
+            submit_rank = None
+            queue_enter_mono_ns = None
+            queue_enter_unix_ns = None
+            admitted_mono_ns = None
+            admitted_unix_ns = None
+            admission_rank = None
+            queue_wait_ms = None
             if leased:
                 try:
                     body = self._body()
@@ -720,6 +766,11 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                     return self._json(411, {"error": {"message": str(e)}})
                 requires_vision = request_has_images(body)
                 affinity_key = request_affinity_key(body, self.headers)
+                request_id = next_request_id(self.headers.get("X-Strata-Benchmark-Request-Id"))
+                run_id = self.headers.get("X-Strata-Benchmark-Run-Id")
+                submit_rank = self.headers.get("X-Strata-Benchmark-Submit-Rank")
+                queue_enter_mono_ns = time.monotonic_ns()
+                queue_enter_unix_ns = time.time_ns()
             try:
                 if leased:
                     lane = pool.acquire(
@@ -727,6 +778,10 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                         affinity_key=affinity_key,
                         request_bytes=len(body or b""),
                     )
+                    admitted_mono_ns = time.monotonic_ns()
+                    admitted_unix_ns = time.time_ns()
+                    admission_rank = next_admission_rank()
+                    queue_wait_ms = (admitted_mono_ns - queue_enter_mono_ns) / 1e6
                 elif path in VISION_METADATA_PATHS and self.command in ("GET", "HEAD"):
                     lane = pool.metadata_lane(lane0)
                 else:
@@ -736,10 +791,38 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
             try:
                 if not lane_engine_alive(lane):
                     return self._json(503, {"error": {"message": f"GPU lane {lane.index} is not running"}})
-                self._proxy(lane, body=body)
+                extra_headers = None
+                if leased:
+                    extra_headers = {
+                        "X-Strata-Lane-Index": str(lane.index),
+                        "X-Strata-Admission-Rank": str(admission_rank),
+                        "X-Strata-Queue-Wait-Ms": f"{queue_wait_ms:.3f}",
+                        "X-Strata-Benchmark-Request-Id": str(request_id),
+                    }
+                self._proxy(lane, body=body, extra_headers=extra_headers)
             finally:
                 if leased:
+                    released_mono_ns = time.monotonic_ns()
+                    released_unix_ns = time.time_ns()
                     pool.release(lane, affinity_key=affinity_key, request_bytes=len(body or b""))
+                    if bench_trace is not None:
+                        bench_trace.write({
+                            "kind": "lane_lease",
+                            "run_id": run_id,
+                            "request_id": request_id,
+                            "submit_rank": submit_rank,
+                            "admission_rank": admission_rank,
+                            "lane_index": lane.index,
+                            "gpu": lane.gpu,
+                            "queue_enter_unix_ns": queue_enter_unix_ns,
+                            "admitted_unix_ns": admitted_unix_ns,
+                            "released_unix_ns": released_unix_ns,
+                            "queue_wait_ms": queue_wait_ms,
+                            "service_ms": (released_mono_ns - admitted_mono_ns) / 1e6,
+                            "request_bytes": len(body or b""),
+                            "requires_vision": requires_vision,
+                            "affinity_key_prefix": affinity_key[:12] if affinity_key else None,
+                        })
 
         do_GET = _dispatch
         do_HEAD = _dispatch
@@ -789,6 +872,8 @@ def main() -> int:
                     help="benchmark only: use the normal private expert arena in each lane")
     ap.add_argument("--reject-generate-proxy", action="store_true",
                     help="benchmark only: reject generation on the supervisor proxy; private lanes still work")
+    ap.add_argument("--bench-trace-jsonl",
+                    help="benchmark only: append exact lane lease timing records as JSONL")
     a = ap.parse_args()
 
     if os.name == "nt":
@@ -834,6 +919,7 @@ def main() -> int:
     state_dir.mkdir(parents=True, exist_ok=True)
     arena_file = Path(a.arena_file).expanduser().resolve() if a.arena_file else default_arena_file(pack, spec)
     arena_file.parent.mkdir(parents=True, exist_ok=True)
+    bench_trace = BenchmarkTrace(Path(a.bench_trace_jsonl).expanduser().resolve()) if a.bench_trace_jsonl else None
 
     try:
         require_ports_free("127.0.0.1", [a.base_port + i for i in range(len(gpus))])
@@ -916,6 +1002,8 @@ def main() -> int:
         flush=True,
     )
     print(f"[strata-multigpu] arena backing: {arena_file} ({spec.bytes:,} bytes)", flush=True)
+    if bench_trace is not None:
+        print(f"[strata-multigpu] benchmark lease trace: {bench_trace.path}", flush=True)
     if vision_lanes:
         print(
             "[strata-multigpu] vision lanes: " +
@@ -980,7 +1068,8 @@ def main() -> int:
         pool = LanePool(lanes)
         httpd = ThreadingHTTPServer(
             (a.host, a.port),
-            make_handler(pool, lanes[0], arena_file, spec.bytes, a.kv_budget, a.reject_generate_proxy),
+            make_handler(pool, lanes[0], arena_file, spec.bytes, a.kv_budget, a.reject_generate_proxy,
+                         bench_trace),
         )
         print(
             f"[strata-multigpu] ready: http://{a.host}:{a.port}/v1 "

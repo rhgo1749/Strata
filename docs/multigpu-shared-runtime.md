@@ -68,6 +68,8 @@ The supervisor prefers explicit `X-Strata-Session-Id`, conversation/session/thre
 
 The trade-off is explicit: preserving a live session can leave another GPU idle briefly or add queueing behind that session's lane. That is preferable to repeatedly paying long-context prefill for the same conversation. More tightly coupled multi-GPU designs remain roadmap challengers and must demonstrate an end-to-end win before promotion.
 
+For controlled overload measurements, `--bench-trace-jsonl FILE` optionally records one server-side lease record per generation request with scheduler queue-entry/admission/release timestamps, admission rank, lane index, exact scheduler queue wait and lane service time. The proxy also exposes `X-Strata-Lane-Index`, `X-Strata-Admission-Rank`, `X-Strata-Queue-Wait-Ms` and an echoed benchmark request ID on generation responses. The JSONL path is opt-in and does not alter the ordinary serving policy.
+
 ## Current promoted engine baseline
 
 The shared-lane runtime is currently based on upstream Strata **0.1.27**. The 3-lane launch contract remains unchanged: one engine per GPU, 262144 context and 32768 resident KV per lane on the reference host, disjoint CPU partitions, per-lane PCIe tuning, and one shared expert arena.
