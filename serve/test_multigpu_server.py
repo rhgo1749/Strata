@@ -58,8 +58,16 @@ class MultiGpuPlanningTests(unittest.TestCase):
         self.assertNotIn("gpu", got)
         self.assertNotIn("layer_split", got)
         self.assertNotIn("--layer-split", got["args"])
+        self.assertEqual(M.option_value(got["args"], "--conversation-cache-mib"), "0")
         self.assertIn("gpu", cfg)
         self.assertIn("--layer-split", cfg["args"])
+
+    def test_lane_config_disables_upstream_conversation_parking(self):
+        cfg = {"args": ["--pack", "/m", "--conversation-cache-mib", "8192",
+                         "--conversation-cache-slots", "4"]}
+        got = M.sanitize_lane_config(cfg)
+        self.assertEqual(M.option_value(got["args"], "--conversation-cache-mib"), "0")
+        self.assertEqual(M.option_value(got["args"], "--conversation-cache-slots"), "4")
 
     def test_nonvision_lane_drops_encoder_and_vram_reserve(self):
         cfg = {"vision": {"exe": "/v", "gpu": True},
@@ -172,6 +180,21 @@ class MultiGpuPlanningTests(unittest.TestCase):
                 self.assertEqual(resp.getheader("X-Strata-Benchmark-Request-Id"), "req-3")
                 self.assertGreaterEqual(float(resp.getheader("X-Strata-Queue-Wait-Ms")), 0.0)
                 self.assertEqual(resp.read(), b'{"ok":true}')
+
+                conn.request(
+                    "POST", "/v1/chat/completions", body=body,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Content-Length": str(len(body)),
+                        "X-Strata-Benchmark-Run-Id": "run-b",
+                        "X-Strata-Benchmark-Request-Id": "req-b0",
+                        "X-Strata-Benchmark-Submit-Rank": "0",
+                    },
+                )
+                resp2 = conn.getresponse()
+                self.assertEqual(resp2.status, 200)
+                self.assertEqual(resp2.getheader("X-Strata-Admission-Rank"), "0")
+                self.assertEqual(resp2.read(), b'{"ok":true}')
                 conn.close()
             finally:
                 proxy.shutdown()
@@ -182,7 +205,7 @@ class MultiGpuPlanningTests(unittest.TestCase):
                 backend_thread.join(1.0)
 
             records = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
-            self.assertEqual(len(records), 1)
+            self.assertEqual(len(records), 2)
             rec = records[0]
             self.assertEqual(rec["run_id"], "run-a")
             self.assertEqual(rec["request_id"], "req-3")
@@ -193,6 +216,8 @@ class MultiGpuPlanningTests(unittest.TestCase):
             self.assertGreaterEqual(rec["service_ms"], 0.0)
             self.assertLessEqual(rec["queue_enter_unix_ns"], rec["admitted_unix_ns"])
             self.assertLessEqual(rec["admitted_unix_ns"], rec["released_unix_ns"])
+            self.assertEqual(records[1]["run_id"], "run-b")
+            self.assertEqual(records[1]["admission_rank"], 0)
 
     def test_parse_vision_lane_indices(self):
         self.assertEqual(M.parse_lane_indices("1", 3, what="--vision-lanes"), {1})

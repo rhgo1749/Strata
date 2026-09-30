@@ -90,6 +90,11 @@ def sanitize_lane_config(cfg: dict) -> dict:
     lane_cfg.pop("layer_split", None)
     if isinstance(lane_cfg.get("args"), list):
         lane_cfg["args"] = remove_option(lane_cfg["args"], "--layer-split")
+        # Upstream 0.1.30 can park multiple conversations inside one engine.
+        # The lane scheduler does not yet advertise or route against parked
+        # snapshot ownership, so keep one live conversation state per lane
+        # until that cross-layer contract is implemented explicitly.
+        lane_cfg["args"] = replace_option(lane_cfg["args"], "--conversation-cache-mib", 0)
     return lane_cfg
 
 
@@ -634,7 +639,7 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                  reject_generate_proxy: bool = False, bench_trace: BenchmarkTrace | None = None):
     counter_lock = threading.Lock()
     request_counter = 0
-    admission_counter = 0
+    admission_counters: dict[str, int] = {}
 
     def next_request_id(explicit: str | None) -> str:
         nonlocal request_counter
@@ -644,11 +649,11 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
             request_counter += 1
             return f"auto-{request_counter}"
 
-    def next_admission_rank() -> int:
-        nonlocal admission_counter
+    def next_admission_rank(run_id: str | None) -> int:
+        key = run_id or "__unscoped__"
         with counter_lock:
-            rank = admission_counter
-            admission_counter += 1
+            rank = admission_counters.get(key, 0)
+            admission_counters[key] = rank + 1
             return rank
 
     class Handler(BaseHTTPRequestHandler):
@@ -780,7 +785,7 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                     )
                     admitted_mono_ns = time.monotonic_ns()
                     admitted_unix_ns = time.time_ns()
-                    admission_rank = next_admission_rank()
+                    admission_rank = next_admission_rank(run_id)
                     queue_wait_ms = (admitted_mono_ns - queue_enter_mono_ns) / 1e6
                 elif path in VISION_METADATA_PATHS and self.command in ("GET", "HEAD"):
                     lane = pool.metadata_lane(lane0)
