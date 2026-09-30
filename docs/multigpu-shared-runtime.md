@@ -74,6 +74,14 @@ The shared-lane runtime is currently based on upstream Strata **0.1.27**. The 3-
 
 The 0.1.27 promotion preserved the CUDA/shared-arena path and the supervisor continues to strip inherited `gpu` / `layer_split` settings from lane configs so an upstream multi-GPU config cannot accidentally re-expand a lane into layer-split mode. Post-paper serving hardening adds multi-session lane affinity and live-state-aware placement without changing the engine execution model.
 
+### Strata 0.1.29 sync candidate
+
+An isolated sync branch rebases the lane runtime onto upstream Strata 0.1.29 without changing the one-engine-per-lane execution contract. The compatibility pass keeps upstream's request-cancellation/session reset fixes, prompt-path fatal-CUDA handling, MTP/native-head VRAM reservation, verify-window bounds guards, prompt-kernel changes, and split sampler while retaining the fork's shared-arena wrapper, adaptive tracing, supervisor, and scheduler.
+
+The shared-arena wrapper still embeds the upstream pinned-arena implementation byte-for-byte; the 0.1.29 upstream `src/core/pinned.cu` hash matches the fork's `src/core/pinned_upstream_impl.cu`. Source-level serving tests, an sm_120 CUDA 13.4 build, available CUDA parity tests, real-model single-lane output parity against 0.1.27, stream-cancellation recovery, one-lane shared-arena serving, and a three-lane concurrent smoke run have passed on the reference host. Model-fixture-dependent tests that require the repository's optional `pack/full/experts.bin` or PLE capture fixtures remain unavailable in the isolated worktree and are not counted as passes.
+
+This is intentionally a **sync candidate, not yet the promoted measurement baseline**. The reference recipe and paper-facing headline tables must be regenerated on one consistent 0.1.29 generation before promotion; historical 0.1.27/earlier performance numbers are not evidence for 0.1.29.
+
 Adaptive hot-expert replacement remains engine-local to each lane. Optional `STRATA_ADAPT_TRACE` instrumentation records first routed misses, adaptive swap selection/publication, and the first later GPU-resident hit without changing the default serving path when tracing is disabled. Reference-host timing and A/B results live in the public recipe repository.
 
 Controlled reference-host evidence for the architecture also includes **1→2→3 lane scaling, private-vs-shared arena PSS, and mixed RTX 5070 Ti + RTX 5060 Ti isolation**. The measurements, conditions, and caveats live in [`docs/systems-ablation-20260929.md`](https://github.com/rhgo1749/qwen3.8-flash-next-strata-gpu-per-lane-recipe/blob/main/docs/systems-ablation-20260929.md); this implementation document intentionally does not duplicate hardware-specific result tables.

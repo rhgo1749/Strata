@@ -79,7 +79,7 @@ The current canonical multi-GPU documents are:
 
 Concrete reference-host hardware, tuning values, benchmark numbers, and production validation records intentionally live in the separate public recipe repository: [`rhgo1749/qwen3.8-flash-next-strata-gpu-per-lane-recipe`](https://github.com/rhgo1749/qwen3.8-flash-next-strata-gpu-per-lane-recipe).
 
-The production baseline remains independent GPU lanes with a shared host expert arena until a challenger clears the roadmap's measurement and compatibility gates. The latest accepted engine sync is Strata 0.1.26 (`44b8221`, 2026-09-30); that promotion preserved the independent-lane/shared-arena architecture while absorbing upstream 0.1.25/0.1.26 CUDA/HIP, prompt-path, KV, and low-RAM changes. Upstream layer-split remains an available challenger rather than the production default.
+The production baseline remains independent GPU lanes with a shared host expert arena until a challenger clears the roadmap's measurement and compatibility gates. The latest accepted engine sync is Strata 0.1.27; that promotion preserved the independent-lane/shared-arena architecture while absorbing the 0.1.27 CJK draft-vocabulary and compatibility changes. A Strata 0.1.29 sync is being validated on an isolated branch: source/test/build/single-lane and multi-lane smoke gates may establish implementation compatibility, but it is not promoted until the reference recipe's headline measurements are rerun on one consistent 0.1.29 generation. Upstream layer-split remains an available challenger rather than the production default.
 
 ## Template for a decision-bearing Issue
 
