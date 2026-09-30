@@ -153,6 +153,92 @@ class MultiGpuPlanningTests(unittest.TestCase):
         self.assertEqual(result[0].index, 0)
         pool.release(result[0])
 
+    def test_affinity_waiter_reserves_released_lane_from_new_session(self):
+        lanes = [
+            M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess(), busy=True),
+            M.Lane(1, "1", 19087, 262144, Path("lane1.json"), process=_AliveProcess(), busy=True),
+        ]
+        pool = M.LanePool(lanes)
+        pool.affinity["returning"] = 0
+        returning = []
+        newcomer = []
+
+        t_returning = threading.Thread(target=lambda: returning.append(pool.acquire(affinity_key="returning")))
+        t_returning.start()
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            with pool.cv:
+                if pool.affinity_waiters[0] == 1:
+                    break
+            time.sleep(0.005)
+        self.assertEqual(pool.affinity_waiters[0], 1)
+
+        t_new = threading.Thread(target=lambda: newcomer.append(pool.acquire(affinity_key="new-chat")))
+        t_new.start()
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            with pool.cv:
+                if len(pool.waiters) == 1:
+                    break
+            time.sleep(0.005)
+        self.assertEqual(len(pool.waiters), 1)
+
+        pool.release(lanes[0], affinity_key="old", request_bytes=1000)
+        t_returning.join(1.0)
+        self.assertFalse(t_returning.is_alive())
+        self.assertEqual(returning[0].index, 0)
+        time.sleep(0.05)
+        self.assertTrue(t_new.is_alive())
+
+        pool.release(lanes[1], affinity_key="other", request_bytes=1000)
+        t_new.join(1.0)
+        self.assertFalse(t_new.is_alive())
+        self.assertEqual(newcomer[0].index, 1)
+        pool.release(returning[0], affinity_key="returning", request_bytes=1100)
+        pool.release(newcomer[0], affinity_key="new-chat", request_bytes=500)
+
+    def test_four_waiting_new_sessions_use_compatible_fifo_order(self):
+        lanes = [
+            M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess(), busy=True),
+            M.Lane(1, "1", 19087, 262144, Path("lane1.json"), process=_AliveProcess(), busy=True),
+            M.Lane(2, "2", 19088, 262144, Path("lane2.json"), process=_AliveProcess(), busy=True),
+        ]
+        pool = M.LanePool(lanes)
+        results = []
+        threads = []
+
+        for i in range(4):
+            thread = threading.Thread(
+                target=lambda i=i: results.append((i, pool.acquire(affinity_key=f"q{i}").index))
+            )
+            thread.start()
+            threads.append(thread)
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline:
+                with pool.cv:
+                    if len(pool.waiters) == i + 1:
+                        break
+                time.sleep(0.005)
+            self.assertEqual(len(pool.waiters), i + 1)
+
+        for expected, lane_index in ((0, 2), (1, 0), (2, 1)):
+            pool.release(lanes[lane_index], affinity_key=f"initial-{lane_index}", request_bytes=1000)
+            deadline = time.monotonic() + 1.0
+            while time.monotonic() < deadline and len(results) <= expected:
+                time.sleep(0.005)
+            self.assertEqual(results[expected], (expected, lane_index))
+
+        self.assertTrue(threads[3].is_alive())
+        pool.release(lanes[2], affinity_key="q0", request_bytes=500)
+        threads[3].join(1.0)
+        self.assertFalse(threads[3].is_alive())
+        self.assertEqual(results[3], (3, 2))
+        for thread in threads[:3]:
+            thread.join(1.0)
+        for lane in lanes:
+            if lane.busy:
+                pool.release(lane)
+
     def test_new_session_waits_when_all_lanes_busy(self):
         lanes = [
             M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess(), busy=True,
@@ -181,6 +267,18 @@ class MultiGpuPlanningTests(unittest.TestCase):
         self.assertEqual(result[0].index, 1)
         pool.release(result[0], affinity_key="new-chat", request_bytes=500)
 
+    def test_unidentified_live_state_is_not_treated_as_empty(self):
+        lanes = [
+            M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess(),
+                   live_affinity_key=None, live_request_bytes=5000, live_sequence=1),
+            M.Lane(1, "1", 19087, 262144, Path("lane1.json"), process=_AliveProcess(),
+                   live_affinity_key="small", live_request_bytes=1000, live_sequence=2),
+        ]
+        pool = M.LanePool(lanes)
+        got = pool.acquire(affinity_key="new-chat", request_bytes=500)
+        self.assertEqual(got.index, 1)
+        pool.release(got, affinity_key="new-chat", request_bytes=500)
+
     def test_new_session_prefers_empty_live_lane(self):
         lanes = [
             M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess(),
@@ -206,6 +304,20 @@ class MultiGpuPlanningTests(unittest.TestCase):
         pool = M.LanePool(lanes)
         got = pool.acquire(affinity_key="new-chat", request_bytes=500)
         self.assertEqual(got.index, 2)
+        pool.release(got, affinity_key="new-chat", request_bytes=500)
+
+    def test_equal_size_prefers_least_recent_live_state(self):
+        lanes = [
+            M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess(),
+                   live_affinity_key="a", live_request_bytes=1000, live_sequence=30),
+            M.Lane(1, "1", 19087, 262144, Path("lane1.json"), process=_AliveProcess(),
+                   live_affinity_key="b", live_request_bytes=1000, live_sequence=10),
+            M.Lane(2, "2", 19088, 262144, Path("lane2.json"), process=_AliveProcess(),
+                   live_affinity_key="c", live_request_bytes=1000, live_sequence=20),
+        ]
+        pool = M.LanePool(lanes)
+        got = pool.acquire(affinity_key="new-chat", request_bytes=500)
+        self.assertEqual(got.index, 1)
         pool.release(got, affinity_key="new-chat", request_bytes=500)
 
     def test_equal_live_states_use_rotating_candidate_order(self):

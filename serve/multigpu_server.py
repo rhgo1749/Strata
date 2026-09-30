@@ -367,6 +367,9 @@ class LanePool:
         self.vision_waiters = 0
         self.max_affinity_entries = max_affinity_entries or max(16, len(lanes) * 8)
         self.affinity: OrderedDict[str, int] = OrderedDict()
+        self.affinity_waiters: dict[int, int] = {lane.index: 0 for lane in lanes}
+        self.waiters: OrderedDict[int, bool] = OrderedDict()
+        self.next_wait_ticket = 0
         self.sequence = 0
 
     def _remember_affinity(self, key: str, lane_index: int) -> None:
@@ -380,9 +383,32 @@ class LanePool:
             if lane_index not in alive_indices:
                 del self.affinity[key]
 
+    def _register_waiter(self, requires_vision: bool) -> int:
+        ticket = self.next_wait_ticket
+        self.next_wait_ticket += 1
+        self.waiters[ticket] = requires_vision
+        return ticket
+
+    def _drop_waiter(self, ticket: int | None) -> None:
+        if ticket is not None:
+            self.waiters.pop(ticket, None)
+
+    def _earlier_waiter_can_use(self, ticket: int, lane: Lane) -> bool:
+        for other_ticket, other_requires_vision in self.waiters.items():
+            if other_ticket == ticket:
+                break
+            if other_requires_vision and not lane.vision:
+                continue
+            if not other_requires_vision and lane.vision and self.vision_waiters:
+                continue
+            return True
+        return False
+
     def acquire(self, *, requires_vision: bool = False, affinity_key: str | None = None,
                 request_bytes: int = 0) -> Lane:
         with self.cv:
+            wait_ticket: int | None = None
+            reserved_lane_index: int | None = None
             if requires_vision:
                 self.vision_waiters += 1
             try:
@@ -396,53 +422,86 @@ class LanePool:
                     if not eligible:
                         raise RuntimeError("no vision-capable GPU lanes are running")
 
-                    # Preserve a session's lane even when other sessions have used that engine in
-                    # between. Strata's per-engine prompt-cache checkpoints can then restore the
-                    # earlier conversation instead of forcing a cross-lane full prefill.
+                    # A remembered continuation owns a reservation on its lane while waiting. This
+                    # prevents a newly awakened session from winning the condition-variable race and
+                    # stealing the cache-rich lane before the continuation can reacquire it.
                     if affinity_key is not None and affinity_key in self.affinity:
+                        if wait_ticket is not None:
+                            self._drop_waiter(wait_ticket)
+                            wait_ticket = None
+                            self.cv.notify_all()
                         preferred = self.lanes[self.affinity[affinity_key]]
                         if requires_vision and not preferred.vision:
                             del self.affinity[affinity_key]
+                            if reserved_lane_index is not None:
+                                self.affinity_waiters[reserved_lane_index] -= 1
+                                reserved_lane_index = None
+                                self.cv.notify_all()
                         else:
                             if preferred.busy or (not requires_vision and preferred.vision and self.vision_waiters):
+                                if reserved_lane_index != preferred.index:
+                                    if reserved_lane_index is not None:
+                                        self.affinity_waiters[reserved_lane_index] -= 1
+                                    self.affinity_waiters[preferred.index] += 1
+                                    reserved_lane_index = preferred.index
                                 self.cv.wait(timeout=1.0)
                                 continue
+                            if reserved_lane_index is not None:
+                                self.affinity_waiters[reserved_lane_index] -= 1
+                                reserved_lane_index = None
                             self.affinity.move_to_end(affinity_key)
                             preferred.busy = True
+                            self.cv.notify_all()
                             return preferred
 
+                    # New sessions use a compatible FIFO ticket. Capability-constrained requests do
+                    # not block unrelated lanes, and lanes reserved by an affinity continuation are
+                    # excluded until that continuation reacquires or abandons the reservation.
+                    if wait_ticket is None:
+                        wait_ticket = self._register_waiter(requires_vision)
                     candidates: list[tuple[int, Lane]] = []
                     for offset in range(len(self.lanes)):
                         idx = (self.cursor + offset) % len(self.lanes)
                         lane = self.lanes[idx]
                         if lane not in eligible or lane.busy:
                             continue
+                        if self.affinity_waiters.get(lane.index, 0) > 0:
+                            continue
                         if not requires_vision and lane.vision and self.vision_waiters:
+                            continue
+                        if self._earlier_waiter_can_use(wait_ticket, lane):
                             continue
                         candidates.append((idx, lane))
                     if candidates:
                         # New-session placement is lexicographic and hardware-agnostic:
-                        # 1) empty live slot, 2) smallest live request state, 3) least recently used
-                        # live state. Candidate order already follows the rotating cursor, which is
-                        # the final fairness tie-breaker. Remembered affinity mappings survive an
-                        # overwrite so older sessions can return and restore prompt checkpoints.
+                        # 1) truly empty live state, 2) smallest live request state, 3) least
+                        # recently used live state, 4) rotating cursor. `live_request_bytes == 0`
+                        # defines empty state so an unidentifiable request cannot masquerade as an
+                        # unused lane merely because it has no affinity key.
                         idx, lane = min(
                             candidates,
                             key=lambda pair: (
-                                0 if pair[1].live_affinity_key is None else 1,
+                                0 if pair[1].live_request_bytes == 0 else 1,
                                 pair[1].live_request_bytes,
                                 pair[1].live_sequence,
                             ),
                         )
                         if affinity_key is not None:
                             self._remember_affinity(affinity_key, lane.index)
+                        self._drop_waiter(wait_ticket)
+                        wait_ticket = None
                         lane.busy = True
                         self.cursor = (idx + 1) % len(self.lanes)
+                        self.cv.notify_all()
                         return lane
                     self.cv.wait(timeout=1.0)
             finally:
+                self._drop_waiter(wait_ticket)
+                if reserved_lane_index is not None:
+                    self.affinity_waiters[reserved_lane_index] -= 1
                 if requires_vision:
                     self.vision_waiters -= 1
+                self.cv.notify_all()
 
     def release(self, lane: Lane, *, affinity_key: str | None = None, request_bytes: int = 0) -> None:
         with self.cv:
@@ -461,26 +520,32 @@ class LanePool:
         return fallback
 
     def status(self) -> list[dict]:
-        return [
-            {
-                "index": x.index,
-                "gpu": x.gpu,
-                "port": x.port,
-                "context": x.context,
-                "cpus": list(x.cpus) if x.cpus else None,
-                "pcie_frac": x.pcie_frac,
-                "kv_resident": x.kv_resident,
-                "vision": x.vision,
-                "pid": x.process.pid if x.process else None,
-                "alive": bool(x.process and x.process.poll() is None),
-                "busy": x.busy,
-                "affinity_sessions": sum(1 for lane_index in self.affinity.values() if lane_index == x.index),
-                "live_session": x.live_affinity_key[:12] if x.live_affinity_key else None,
-                "live_request_bytes": x.live_request_bytes,
-                "live_sequence": x.live_sequence,
-            }
-            for x in self.lanes
-        ]
+        with self.cv:
+            return [
+                {
+                    "index": x.index,
+                    "gpu": x.gpu,
+                    "port": x.port,
+                    "context": x.context,
+                    "cpus": list(x.cpus) if x.cpus else None,
+                    "pcie_frac": x.pcie_frac,
+                    "kv_resident": x.kv_resident,
+                    "vision": x.vision,
+                    "pid": x.process.pid if x.process else None,
+                    "alive": bool(x.process and x.process.poll() is None),
+                    "busy": x.busy,
+                    "affinity_sessions": sum(1 for lane_index in self.affinity.values() if lane_index == x.index),
+                    "affinity_waiters": self.affinity_waiters.get(x.index, 0),
+                    "live_session": x.live_affinity_key[:12] if x.live_affinity_key else None,
+                    "live_request_bytes": x.live_request_bytes,
+                    "live_sequence": x.live_sequence,
+                }
+                for x in self.lanes
+            ]
+
+    def queue_depth(self) -> int:
+        with self.cv:
+            return len(self.waiters)
 
 
 def wait_ready(lane: Lane, timeout: float) -> None:
@@ -538,6 +603,7 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                 "arena_bytes": arena_bytes,
                 "kv_budget": kv_budget,
                 "lane_context_total": sum(x.context for x in pool.lanes),
+                "queue_depth": pool.queue_depth(),
                 "lanes": pool.status(),
             })
 
