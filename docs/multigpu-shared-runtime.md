@@ -12,6 +12,7 @@ Detailed reference-host hardware, tuning values, benchmark tables, and validatio
 - Host-KV capacity is configured per lane rather than through a dynamic cross-lane allocator.
 - CPU affinity is partitioned between lanes by default so independent expert worker pools do not collide on the same physical cores.
 - Generation requests are leased to one lane for the duration of the request or stream.
+- Conversation requests preserve lane affinity when the supervisor can identify a stable session, so lane-local KV/checkpoints survive across turns instead of being discarded by request-level round-robin routing.
 - The default single-GPU Strata path is unchanged when the shared-arena mode is not enabled.
 
 ## Shared arena
@@ -63,7 +64,9 @@ GPU-resident KV is also per lane. Increasing it can displace the GPU hot-expert 
 
 The production parallelism unit is a whole request or session, not a token, tensor, layer, or expert. This avoids mandatory cross-GPU communication in the normal decode path and preserves comparatively small failure domains.
 
-The trade-off is explicit: when only one request is active, other GPU lanes may be idle. More tightly coupled multi-GPU designs remain roadmap challengers and must demonstrate an end-to-end win before promotion.
+The supervisor prefers explicit `X-Strata-Session-Id`, conversation/session/thread identifiers in the request, and otherwise derives a privacy-safe best-effort key from the first user message. Once a session owns an eligible lane, a later turn waits for that lane when it is busy rather than spilling to another GPU and forcing a full prompt reread. New sessions prefer unbound lanes before replacing an older affinity. Requests with no derivable key keep the ordinary free-lane behavior.
+
+The trade-off is explicit: preserving a live session can leave another GPU idle briefly or add queueing behind that session's lane. That is preferable to repeatedly paying long-context prefill for the same conversation. More tightly coupled multi-GPU designs remain roadmap challengers and must demonstrate an end-to-end win before promotion.
 
 ## Current promoted engine baseline
 
@@ -86,4 +89,5 @@ Current boundaries:
 3. Source expert loading is still repeated during sequential lane startup.
 4. Hot-expert caches are lane-local; there is no required cross-GPU ownership scheme.
 5. The supervisor is focused on generation serving and may route other endpoints through one lane.
-6. Context lengths beyond the model/runtime's validated range remain experimental.
+6. Session affinity is only as strong as the available identity. Explicit session/conversation/thread IDs are authoritative; the first-user-message fallback is best effort and can be replaced when more active sessions exist than lanes.
+7. Context lengths beyond the model/runtime's validated range remain experimental.

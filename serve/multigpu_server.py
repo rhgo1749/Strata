@@ -38,6 +38,8 @@ HOP_BY_HOP = {
 }
 GENERATE_PATHS = {"/v1/chat/completions", "/v1/messages"}
 VISION_METADATA_PATHS = {"/health", "/props", "/models", "/v1/models"}
+AFFINITY_HEADERS = ("x-strata-session-id", "x-conversation-id", "x-session-id", "x-thread-id")
+AFFINITY_FIELDS = ("conversation_id", "session_id", "thread_id")
 
 
 def option_value(args: list[str], name: str) -> str | None:
@@ -199,6 +201,51 @@ def request_has_images(body: bytes) -> bool:
     return False
 
 
+def _affinity_digest(source: str, value) -> str:
+    canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256((source + "\0" + canonical).encode("utf-8")).hexdigest()
+
+
+def request_affinity_key(body: bytes, headers=None) -> str | None:
+    """Return a privacy-safe stable key for a conversation when the request exposes one.
+
+    Explicit conversation/session/thread identifiers win.  For ordinary OpenAI/Anthropic
+    chat bodies that do not carry one, the first user message is a best-effort stable seed:
+    appended history then keeps the same lane and its lane-local conversation/KV state.
+    """
+    if headers is not None:
+        for name in AFFINITY_HEADERS:
+            value = headers.get(name)
+            if value not in (None, ""):
+                return _affinity_digest("header:" + name, value)
+    try:
+        req = json.loads(body) if body else {}
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(req, dict):
+        return None
+    for name in AFFINITY_FIELDS:
+        value = req.get(name)
+        if isinstance(value, (str, int)) and value != "":
+            return _affinity_digest("body:" + name, value)
+    metadata = req.get("metadata")
+    if isinstance(metadata, dict):
+        for name in AFFINITY_FIELDS:
+            value = metadata.get(name)
+            if isinstance(value, (str, int)) and value != "":
+                return _affinity_digest("metadata:" + name, value)
+    messages = req.get("messages")
+    if isinstance(messages, list):
+        for message in messages:
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            seed = {"content": message.get("content")}
+            if message.get("name") is not None:
+                seed["name"] = message.get("name")
+            return _affinity_digest("first-user", seed)
+    return None
+
+
 def lane_contexts(base_context: int, lanes: int, requested: str | None, kv_budget: int | None) -> list[int]:
     if requested:
         values = parse_int_list(requested, what="--lane-contexts")
@@ -306,6 +353,7 @@ class Lane:
     vision: bool = False
     process: subprocess.Popen | None = None
     busy: bool = False
+    affinity_key: str | None = None
 
 
 class LanePool:
@@ -315,7 +363,7 @@ class LanePool:
         self.cursor = 0
         self.vision_waiters = 0
 
-    def acquire(self, *, requires_vision: bool = False) -> Lane:
+    def acquire(self, *, requires_vision: bool = False, affinity_key: str | None = None) -> Lane:
         with self.cv:
             if requires_vision:
                 self.vision_waiters += 1
@@ -327,6 +375,19 @@ class LanePool:
                     eligible = [x for x in alive if not requires_vision or x.vision]
                     if not eligible:
                         raise RuntimeError("no vision-capable GPU lanes are running")
+
+                    # A conversation that still owns an eligible lane waits for that lane instead
+                    # of spilling to a free GPU and throwing away its lane-local KV/checkpoints.
+                    if affinity_key is not None:
+                        preferred = next((x for x in eligible if x.affinity_key == affinity_key), None)
+                        if preferred is not None:
+                            if preferred.busy or (not requires_vision and preferred.vision and self.vision_waiters):
+                                self.cv.wait(timeout=1.0)
+                                continue
+                            preferred.busy = True
+                            return preferred
+
+                    candidates: list[tuple[int, Lane]] = []
                     for offset in range(len(self.lanes)):
                         idx = (self.cursor + offset) % len(self.lanes)
                         lane = self.lanes[idx]
@@ -334,6 +395,18 @@ class LanePool:
                             continue
                         if not requires_vision and lane.vision and self.vision_waiters:
                             continue
+                        candidates.append((idx, lane))
+                    if candidates:
+                        # Keep existing sessions undisturbed when an unused lane is available.
+                        idx, lane = next((pair for pair in candidates if pair[1].affinity_key is None), candidates[0])
+                        if affinity_key is not None:
+                            for other in self.lanes:
+                                if other is not lane and other.affinity_key == affinity_key:
+                                    other.affinity_key = None
+                            lane.affinity_key = affinity_key
+                        else:
+                            # An unidentifiable request may rewrite this engine's conversation state.
+                            lane.affinity_key = None
                         lane.busy = True
                         self.cursor = (idx + 1) % len(self.lanes)
                         return lane
@@ -368,6 +441,7 @@ class LanePool:
                 "pid": x.process.pid if x.process else None,
                 "alive": bool(x.process and x.process.poll() is None),
                 "busy": x.busy,
+                "affinity": x.affinity_key[:12] if x.affinity_key else None,
             }
             for x in self.lanes
         ]
@@ -499,15 +573,17 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
             leased = path in GENERATE_PATHS and self.command == "POST"
             body = None
             requires_vision = False
+            affinity_key = None
             if leased:
                 try:
                     body = self._body()
                 except ValueError as e:
                     return self._json(411, {"error": {"message": str(e)}})
                 requires_vision = request_has_images(body)
+                affinity_key = request_affinity_key(body, self.headers)
             try:
                 if leased:
-                    lane = pool.acquire(requires_vision=requires_vision)
+                    lane = pool.acquire(requires_vision=requires_vision, affinity_key=affinity_key)
                 elif path in VISION_METADATA_PATHS and self.command in ("GET", "HEAD"):
                     lane = pool.metadata_lane(lane0)
                 else:

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -82,6 +85,24 @@ class MultiGpuPlanningTests(unittest.TestCase):
         self.assertFalse(M.request_has_images(text))
         self.assertFalse(M.request_has_images(b"not-json"))
 
+    def test_affinity_key_survives_appended_chat_history(self):
+        first = {"messages": [{"role": "system", "content": "rules"},
+                              {"role": "user", "content": "build the thing"}]}
+        later = {"messages": first["messages"] + [{"role": "assistant", "content": "working"},
+                                                   {"role": "user", "content": "continue"}]}
+        self.assertEqual(
+            M.request_affinity_key(json.dumps(first).encode()),
+            M.request_affinity_key(json.dumps(later).encode()),
+        )
+
+    def test_explicit_affinity_id_wins_over_message_fallback(self):
+        body = b'{"messages":[{"role":"user","content":"hello"}]}'
+        explicit = M.request_affinity_key(body, {"x-strata-session-id": "session-a"})
+        fallback = M.request_affinity_key(body)
+        self.assertIsNotNone(explicit)
+        self.assertNotEqual(explicit, fallback)
+        self.assertEqual(explicit, M.request_affinity_key(b'{"messages":[]}', {"x-strata-session-id": "session-a"}))
+
     def test_vision_request_uses_only_vision_lane(self):
         lanes = [
             M.Lane(0, "0", 19086, 262144, Path("lane0.json"), vision=False, process=_AliveProcess()),
@@ -104,6 +125,57 @@ class MultiGpuPlanningTests(unittest.TestCase):
         pool.vision_waiters = 1
         got = pool.acquire()
         self.assertEqual(got.index, 2)
+        pool.release(got)
+
+    def test_affinity_waits_for_its_busy_lane_instead_of_spilling(self):
+        lanes = [
+            M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess(),
+                   busy=True, affinity_key="chat-a"),
+            M.Lane(1, "1", 19087, 262144, Path("lane1.json"), process=_AliveProcess()),
+        ]
+        pool = M.LanePool(lanes)
+        pool.cursor = 1
+        started = threading.Event()
+        result = []
+
+        def acquire():
+            started.set()
+            result.append(pool.acquire(affinity_key="chat-a"))
+
+        thread = threading.Thread(target=acquire)
+        thread.start()
+        self.assertTrue(started.wait(1.0))
+        time.sleep(0.05)
+        self.assertTrue(thread.is_alive())
+        pool.release(lanes[0])
+        thread.join(1.0)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result[0].index, 0)
+        pool.release(result[0])
+
+    def test_new_affinity_prefers_an_unbound_lane(self):
+        lanes = [
+            M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess(), affinity_key="chat-a"),
+            M.Lane(1, "1", 19087, 262144, Path("lane1.json"), process=_AliveProcess()),
+            M.Lane(2, "2", 19088, 262144, Path("lane2.json"), process=_AliveProcess(), affinity_key="chat-b"),
+        ]
+        pool = M.LanePool(lanes)
+        got = pool.acquire(affinity_key="chat-c")
+        self.assertEqual(got.index, 1)
+        self.assertEqual(got.affinity_key, "chat-c")
+        pool.release(got)
+
+    def test_vision_request_rebinds_affinity_to_a_vision_lane(self):
+        lanes = [
+            M.Lane(0, "0", 19086, 262144, Path("lane0.json"), vision=False, process=_AliveProcess(),
+                   affinity_key="chat-a"),
+            M.Lane(1, "1", 19087, 262144, Path("lane1.json"), vision=True, process=_AliveProcess()),
+        ]
+        pool = M.LanePool(lanes)
+        got = pool.acquire(requires_vision=True, affinity_key="chat-a")
+        self.assertEqual(got.index, 1)
+        self.assertIsNone(lanes[0].affinity_key)
+        self.assertEqual(lanes[1].affinity_key, "chat-a")
         pool.release(got)
 
     def test_metadata_prefers_healthy_vision_lane(self):
