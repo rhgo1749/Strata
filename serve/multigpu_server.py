@@ -352,11 +352,26 @@ class Lane:
     pcie_frac: float | None = None
     kv_resident: int | None = None
     vision: bool = False
+    vram_reserve_mib: int | None = None
     process: subprocess.Popen | None = None
     busy: bool = False
     live_affinity_key: str | None = None
     live_request_bytes: int = 0
     live_sequence: int = 0
+
+
+def lane_engine_alive(lane: Lane, timeout: float = 0.2) -> bool:
+    """Return whether both the lane wrapper and its child engine are currently healthy."""
+    if lane.process is None or lane.process.poll() is not None:
+        return False
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{lane.port}/health", timeout=timeout) as r:
+            if not (200 <= r.status < 300):
+                return False
+            payload = json.loads(r.read() or b"{}")
+            return bool(payload.get("engine_alive", payload.get("status") == "ok"))
+    except Exception:
+        return False
 
 
 class LanePool:
@@ -413,7 +428,7 @@ class LanePool:
                 self.vision_waiters += 1
             try:
                 while True:
-                    alive = [x for x in self.lanes if x.process is not None and x.process.poll() is None]
+                    alive = [x for x in self.lanes if lane_engine_alive(x)]
                     if not alive:
                         raise RuntimeError("all GPU lanes have stopped")
                     alive_indices = {x.index for x in alive}
@@ -422,9 +437,6 @@ class LanePool:
                     if not eligible:
                         raise RuntimeError("no vision-capable GPU lanes are running")
 
-                    # A remembered continuation owns a reservation on its lane while waiting. This
-                    # prevents a newly awakened session from winning the condition-variable race and
-                    # stealing the cache-rich lane before the continuation can reacquire it.
                     if affinity_key is not None and affinity_key in self.affinity:
                         if wait_ticket is not None:
                             self._drop_waiter(wait_ticket)
@@ -454,9 +466,6 @@ class LanePool:
                             self.cv.notify_all()
                             return preferred
 
-                    # New sessions use a compatible FIFO ticket. Capability-constrained requests do
-                    # not block unrelated lanes, and lanes reserved by an affinity continuation are
-                    # excluded until that continuation reacquires or abandons the reservation.
                     if wait_ticket is None:
                         wait_ticket = self._register_waiter(requires_vision)
                     candidates: list[tuple[int, Lane]] = []
@@ -473,11 +482,6 @@ class LanePool:
                             continue
                         candidates.append((idx, lane))
                     if candidates:
-                        # New-session placement is lexicographic and hardware-agnostic:
-                        # 1) truly empty live state, 2) smallest live request state, 3) least
-                        # recently used live state, 4) rotating cursor. `live_request_bytes == 0`
-                        # defines empty state so an unidentifiable request cannot masquerade as an
-                        # unused lane merely because it has no affinity key.
                         idx, lane = min(
                             candidates,
                             key=lambda pair: (
@@ -513,9 +517,8 @@ class LanePool:
             self.cv.notify_all()
 
     def metadata_lane(self, fallback: Lane) -> Lane:
-        """Advertise pool-wide vision capability through a healthy vision lane when available."""
         for lane in self.lanes:
-            if lane.vision and lane.process is not None and lane.process.poll() is None:
+            if lane.vision and lane_engine_alive(lane):
                 return lane
         return fallback
 
@@ -531,8 +534,10 @@ class LanePool:
                     "pcie_frac": x.pcie_frac,
                     "kv_resident": x.kv_resident,
                     "vision": x.vision,
+                    "vram_reserve_mib": x.vram_reserve_mib,
                     "pid": x.process.pid if x.process else None,
-                    "alive": bool(x.process and x.process.poll() is None),
+                    "wrapper_alive": bool(x.process and x.process.poll() is None),
+                    "alive": lane_engine_alive(x),
                     "busy": x.busy,
                     "affinity_sessions": sum(1 for lane_index in self.affinity.values() if lane_index == x.index),
                     "affinity_waiters": self.affinity_waiters.get(x.index, 0),
@@ -611,7 +616,7 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
             self._json(200, [
                 {"id": lane.index, "n_ctx": lane.context,
                  "is_processing": lane.busy, "gpu": lane.gpu, "vision": lane.vision}
-                for lane in pool.lanes if lane.process is not None and lane.process.poll() is None
+                for lane in pool.lanes if lane_engine_alive(lane)
             ])
 
         def _body(self) -> bytes:
@@ -697,7 +702,7 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
             except RuntimeError as e:
                 return self._json(503, {"error": {"message": str(e)}})
             try:
-                if lane.process is None or lane.process.poll() is not None:
+                if not lane_engine_alive(lane):
                     return self._json(503, {"error": {"message": f"GPU lane {lane.index} is not running"}})
                 self._proxy(lane, body=body)
             finally:
@@ -744,6 +749,8 @@ def main() -> int:
                     help="per-lane --pcie-frac values, e.g. 0.55,0.30,0.55")
     ap.add_argument("--lane-kv-residents",
                     help="per-lane --kv-resident token counts, e.g. 65536,32768,32768")
+    ap.add_argument("--lane-vram-reserve-mibs",
+                    help="per-lane --vram-reserve-mib values, e.g. 1200,1200,1200")
     ap.add_argument("--vision-lanes",
                     help="0-based lane indices allowed to serve images, e.g. 1 or 0,2; defaults to lane 0 when vision is configured")
     ap.add_argument("--private-arena", action="store_true",
@@ -831,6 +838,16 @@ def main() -> int:
         except ValueError as e:
             ap.error(str(e))
 
+    vram_reserves: list[int | None] = [None] * len(gpus)
+    if a.lane_vram_reserve_mibs:
+        try:
+            values = parse_int_list(a.lane_vram_reserve_mibs, what="--lane-vram-reserve-mibs")
+            if len(values) != len(gpus):
+                raise ValueError(f"--lane-vram-reserve-mibs has {len(values)} values for {len(gpus)} GPU lanes")
+            vram_reserves = list(values)
+        except ValueError as e:
+            ap.error(str(e))
+
     lanes: list[Lane] = []
     for i, (gpu, ctx) in enumerate(zip(gpus, contexts)):
         lane_cfg = sanitize_lane_config(cfg)
@@ -841,6 +858,8 @@ def main() -> int:
             lane_cfg["args"] = replace_option(lane_cfg["args"], "--pcie-frac", pcie_fracs[i])
         if kv_residents[i] is not None:
             lane_cfg["args"] = replace_option(lane_cfg["args"], "--kv-resident", kv_residents[i])
+        if vram_reserves[i] is not None:
+            lane_cfg["args"] = replace_option(lane_cfg["args"], "--vram-reserve-mib", vram_reserves[i])
         lane_cfg["host"] = "127.0.0.1"
         if cfg.get("log"):
             log = resolve_config_path(cfg["log"], cfg.get("cwd"))
@@ -849,7 +868,8 @@ def main() -> int:
             lane_cfg["log"] = str(state_dir / f"lane-{i}-gpu{gpu}.log")
         lane_config = state_dir / f"lane-{i}-gpu{gpu}.json"
         lane_config.write_text(json.dumps(lane_cfg, indent=1), encoding="utf-8")
-        lanes.append(Lane(i, gpu, a.base_port + i, ctx, lane_config, cpu_sets[i], pcie_fracs[i], kv_residents[i], lane_vision))
+        lanes.append(Lane(i, gpu, a.base_port + i, ctx, lane_config, cpu_sets[i], pcie_fracs[i], kv_residents[i],
+                          lane_vision, vram_reserves[i]))
 
     print(
         f"[strata-multigpu] {len(lanes)} lanes; context capacities {contexts} "
@@ -879,6 +899,12 @@ def main() -> int:
         print(
             "[strata-multigpu] KV resident: " +
             ", ".join(f"lane {x.index}={x.kv_resident}" for x in lanes if x.kv_resident is not None),
+            flush=True,
+        )
+    if any(x.vram_reserve_mib is not None for x in lanes):
+        print(
+            "[strata-multigpu] VRAM reserve MiB: " +
+            ", ".join(f"lane {x.index}={x.vram_reserve_mib}" for x in lanes if x.vram_reserve_mib is not None),
             flush=True,
         )
 
