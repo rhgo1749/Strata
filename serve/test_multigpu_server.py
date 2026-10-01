@@ -600,6 +600,79 @@ class MultiGpuPlanningTests(unittest.TestCase):
         self.assertEqual(acquired[0].index, 0)
         pool.release(acquired[0], affinity_key="queued", request_bytes=4321)
 
+    def test_active_work_is_separate_from_retained_lane_state(self):
+        lane = M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess())
+        pool = M.LanePool([lane])
+        signature = (("prompt-a", 123), ("prompt-b", 77))
+
+        got = pool.acquire(
+            affinity_key="session-a",
+            request_bytes=4567,
+            prompt_signature=signature,
+        )
+        self.assertIs(got, lane)
+        self.assertTrue(lane.busy)
+        self.assertEqual(lane.active_affinity_key, "session-a")
+        self.assertEqual(lane.active_request_bytes, 4567)
+        self.assertEqual(lane.active_prompt_signature, signature)
+        self.assertIsNotNone(lane.active_started_mono_ns)
+        self.assertEqual(lane.live_request_bytes, 0)
+        self.assertEqual(lane.live_prompt_signature, ())
+
+        pool.release(
+            lane,
+            affinity_key="session-a",
+            request_bytes=4567,
+            prompt_signature=signature,
+        )
+        self.assertFalse(lane.busy)
+        self.assertIsNone(lane.active_affinity_key)
+        self.assertEqual(lane.active_request_bytes, 0)
+        self.assertEqual(lane.active_prompt_signature, ())
+        self.assertIsNone(lane.active_started_mono_ns)
+        self.assertEqual(lane.live_request_bytes, 4567)
+        self.assertEqual(lane.live_prompt_signature, signature)
+
+    def test_decision_record_exposes_phase2_queue_and_active_proxies(self):
+        lanes = [
+            M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess()),
+            M.Lane(1, "1", 19087, 262144, Path("lane1.json"), vision=True, process=_AliveProcess()),
+        ]
+        pool = M.LanePool(lanes)
+        pool.affinity.update({"a": 0, "b": 0, "c": 1})
+        now = time.monotonic_ns()
+        pool.waiters[10] = M.Waiter(False, 4000, now - 5_000_000)
+        pool.waiters[11] = M.Waiter(True, 2000, now - 10_000_000)
+        pool._start_lane_work(
+            lanes[0],
+            affinity_key="active-a",
+            request_bytes=1234,
+            prompt_signature=(("active", 50),),
+        )
+
+        record = pool._decision_record(
+            alive=lanes,
+            eligible=lanes,
+            selected=lanes[1],
+            selected_reason="test",
+            request_bytes=999,
+            prompt_signature=(("incoming", 60),),
+            session_turn=1,
+        )
+        by_lane = {row["lane_index"]: row for row in record["lane_components"]}
+
+        self.assertEqual(by_lane[0]["affinity_session_count"], 2)
+        self.assertEqual(by_lane[1]["affinity_session_count"], 1)
+        self.assertEqual(by_lane[0]["active_request_bytes"], 1234)
+        self.assertEqual(by_lane[0]["active_prompt_message_bytes"], 50)
+        self.assertIsNotNone(by_lane[0]["active_elapsed_ms"])
+        self.assertEqual(by_lane[0]["compatible_queued_request_count"], 1)
+        self.assertEqual(by_lane[0]["compatible_queued_request_bytes"], 4000)
+        self.assertGreaterEqual(by_lane[0]["oldest_compatible_queue_age_ms"], 5.0)
+        self.assertEqual(by_lane[1]["compatible_queued_request_count"], 2)
+        self.assertEqual(by_lane[1]["compatible_queued_request_bytes"], 6000)
+        self.assertGreaterEqual(by_lane[1]["oldest_compatible_queue_age_ms"], 10.0)
+
     def test_unidentified_live_state_is_not_treated_as_empty(self):
         lanes = [
             M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess(),

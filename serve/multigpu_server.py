@@ -452,6 +452,10 @@ class Lane:
     live_request_bytes: int = 0
     live_sequence: int = 0
     live_prompt_signature: tuple[tuple[str, int], ...] = ()
+    active_affinity_key: str | None = None
+    active_request_bytes: int = 0
+    active_prompt_signature: tuple[tuple[str, int], ...] = ()
+    active_started_mono_ns: int | None = None
 
 
 @dataclass(frozen=True)
@@ -564,6 +568,29 @@ class LanePool:
         if ticket is not None:
             self.waiters.pop(ticket, None)
 
+    def _start_lane_work(self, lane: Lane, *, affinity_key: str | None,
+                         request_bytes: int,
+                         prompt_signature: tuple[tuple[str, int], ...]) -> None:
+        lane.active_affinity_key = affinity_key
+        lane.active_request_bytes = max(0, request_bytes)
+        lane.active_prompt_signature = prompt_signature
+        lane.active_started_mono_ns = time.monotonic_ns()
+        lane.busy = True
+
+    def _compatible_waiter_stats(self, lane: Lane, now_ns: int) -> tuple[int, int, float | None]:
+        compatible = [
+            waiter for waiter in self.waiters.values()
+            if not waiter.requires_vision or lane.vision
+        ]
+        if not compatible:
+            return 0, 0, None
+        oldest_ns = min(waiter.entered_mono_ns for waiter in compatible)
+        return (
+            len(compatible),
+            sum(waiter.request_bytes for waiter in compatible),
+            max(0.0, (now_ns - oldest_ns) / 1e6),
+        )
+
     def _earlier_waiter_can_use(self, ticket: int, lane: Lane) -> bool:
         for other_ticket, waiter in self.waiters.items():
             if other_ticket == ticket:
@@ -582,10 +609,12 @@ class LanePool:
         alive_indices = {lane.index for lane in alive}
         eligible_indices = {lane.index for lane in eligible}
         prompt_bytes = sum(size for _digest, size in prompt_signature)
+        now_ns = time.monotonic_ns()
         lane_components = []
         for position, lane in enumerate(self.lanes):
             reuse_bytes = reusable_prefix_bytes(prompt_signature, lane.live_prompt_signature)
             rotation_offset = (position - self.cursor) % len(self.lanes)
+            queued_count, queued_bytes, oldest_queue_age_ms = self._compatible_waiter_stats(lane, now_ns)
             placement_key = [
                 0 if lane.live_request_bytes == 0 else 1,
                 lane.live_request_bytes,
@@ -599,8 +628,25 @@ class LanePool:
                 "busy": lane.busy,
                 "vision": lane.vision,
                 "affinity_waiters": self.affinity_waiters.get(lane.index, 0),
+                "affinity_session_count": sum(
+                    1 for lane_index in self.affinity.values() if lane_index == lane.index
+                ),
                 "live_request_bytes": lane.live_request_bytes,
+                "retained_prompt_message_bytes": sum(
+                    size for _digest, size in lane.live_prompt_signature
+                ),
                 "live_sequence": lane.live_sequence,
+                "active_request_bytes": lane.active_request_bytes,
+                "active_prompt_message_bytes": sum(
+                    size for _digest, size in lane.active_prompt_signature
+                ),
+                "active_elapsed_ms": (
+                    max(0.0, (now_ns - lane.active_started_mono_ns) / 1e6)
+                    if lane.busy and lane.active_started_mono_ns is not None else None
+                ),
+                "compatible_queued_request_count": queued_count,
+                "compatible_queued_request_bytes": queued_bytes,
+                "oldest_compatible_queue_age_ms": oldest_queue_age_ms,
                 "rotation_offset": rotation_offset,
                 "estimated_reusable_prefix_bytes": reuse_bytes,
                 "estimated_new_prefill_bytes": max(0, prompt_bytes - reuse_bytes),
@@ -679,7 +725,12 @@ class LanePool:
                                     prompt_signature=prompt_signature,
                                     session_turn=session_turn,
                                 ))
-                            preferred.busy = True
+                            self._start_lane_work(
+                                preferred,
+                                affinity_key=affinity_key,
+                                request_bytes=request_bytes,
+                                prompt_signature=prompt_signature,
+                            )
                             self.cv.notify_all()
                             return preferred
 
@@ -722,7 +773,12 @@ class LanePool:
                                 prompt_signature=prompt_signature,
                                 session_turn=session_turn,
                             ))
-                        lane.busy = True
+                        self._start_lane_work(
+                            lane,
+                            affinity_key=affinity_key,
+                            request_bytes=request_bytes,
+                            prompt_signature=prompt_signature,
+                        )
                         self.cursor = (idx + 1) % len(self.lanes)
                         self.cv.notify_all()
                         return lane
@@ -743,6 +799,10 @@ class LanePool:
             lane.live_request_bytes = max(0, request_bytes)
             lane.live_sequence = self.sequence
             lane.live_prompt_signature = prompt_signature
+            lane.active_affinity_key = None
+            lane.active_request_bytes = 0
+            lane.active_prompt_signature = ()
+            lane.active_started_mono_ns = None
             lane.busy = False
             self.cv.notify_all()
 
@@ -773,7 +833,19 @@ class LanePool:
                     "affinity_waiters": self.affinity_waiters.get(x.index, 0),
                     "live_session": x.live_affinity_key[:12] if x.live_affinity_key else None,
                     "live_request_bytes": x.live_request_bytes,
+                    "retained_prompt_message_bytes": sum(
+                        size for _digest, size in x.live_prompt_signature
+                    ),
                     "live_sequence": x.live_sequence,
+                    "active_session": x.active_affinity_key[:12] if x.active_affinity_key else None,
+                    "active_request_bytes": x.active_request_bytes,
+                    "active_prompt_message_bytes": sum(
+                        size for _digest, size in x.active_prompt_signature
+                    ),
+                    "active_elapsed_ms": (
+                        max(0.0, (time.monotonic_ns() - x.active_started_mono_ns) / 1e6)
+                        if x.busy and x.active_started_mono_ns is not None else None
+                    ),
                 }
                 for x in self.lanes
             ]
