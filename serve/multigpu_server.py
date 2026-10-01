@@ -587,21 +587,24 @@ class LanePool:
 
 
 def require_ports_free(host: str, ports: list[int]) -> None:
-    """Fail before model loading if any fixed supervisor/lane port is already occupied."""
-    held: list[socket.socket] = []
-    try:
-        for port in ports:
-            if port == 0:
-                continue
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            try:
-                s.bind((host, port))
-            except OSError as e:
-                s.close()
-                raise RuntimeError(f"port {host}:{port} is already in use") from e
-            held.append(s)
-    finally:
-        for s in held:
+    """Fail before model loading only when a fixed port has a live listener.
+
+    A bind-based probe also rejects a recently closed server while its socket is
+    in TIME_WAIT, which makes back-to-back benchmark launches fail even though
+    no stale service can answer readiness.  Probe connectability instead: a
+    successful connect means there is an actual listener that could satisfy
+    /health; connection-refused means the port is safe to reuse.
+    """
+    probe_host = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
+    for port in ports:
+        if port == 0:
+            continue
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.2)
+        try:
+            if s.connect_ex((probe_host, port)) == 0:
+                raise RuntimeError(f"port {host}:{port} is already in use")
+        finally:
             s.close()
 
 

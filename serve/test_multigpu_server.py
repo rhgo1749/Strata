@@ -115,6 +115,7 @@ class MultiGpuPlanningTests(unittest.TestCase):
     def test_port_preflight_rejects_stale_listener(self):
         sock = M.socket.socket(M.socket.AF_INET, M.socket.SOCK_STREAM)
         sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
         port = sock.getsockname()[1]
         try:
             with self.assertRaisesRegex(RuntimeError, "already in use"):
