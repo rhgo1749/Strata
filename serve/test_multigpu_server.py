@@ -163,7 +163,7 @@ class MultiGpuPlanningTests(unittest.TestCase):
             proxy_thread.start()
             try:
                 conn = M.http.client.HTTPConnection("127.0.0.1", proxy.server_address[1], timeout=2)
-                body = b'{"messages":[{"role":"user","content":"hi"}]}'
+                body = b'{"stream":true,"messages":[{"role":"user","content":"hi"}]}'
                 conn.request(
                     "POST", "/v1/chat/completions", body=body,
                     headers={
@@ -172,6 +172,13 @@ class MultiGpuPlanningTests(unittest.TestCase):
                         "X-Strata-Benchmark-Run-Id": "run-a",
                         "X-Strata-Benchmark-Request-Id": "req-3",
                         "X-Strata-Benchmark-Submit-Rank": "3",
+                        "X-Strata-Benchmark-Workload": "unit-chat",
+                        "X-Strata-Benchmark-Cache-State": "cold",
+                        "X-Strata-Benchmark-Interference-Arm": "solo",
+                        "X-Strata-Benchmark-Input-Tokens": "11",
+                        "X-Strata-Benchmark-Reusable-Prefix-Tokens": "0",
+                        "X-Strata-Benchmark-New-Prefill-Tokens": "11",
+                        "X-Strata-Benchmark-Output-Target-Tokens": "8",
                     },
                 )
                 resp = conn.getresponse()
@@ -215,10 +222,65 @@ class MultiGpuPlanningTests(unittest.TestCase):
             self.assertEqual(rec["lane_index"], 0)
             self.assertGreaterEqual(rec["queue_wait_ms"], 0.0)
             self.assertGreaterEqual(rec["service_ms"], 0.0)
+            self.assertGreaterEqual(rec["e2e_ms"], rec["service_ms"])
+            self.assertGreaterEqual(rec["response_first_byte_ms"], 0.0)
+            self.assertEqual(rec["ttft_ms"], rec["response_first_byte_ms"])
+            self.assertEqual(rec["completion_reason"], "completed")
+            self.assertEqual(rec["http_status"], 200)
+            self.assertEqual(rec["response_bytes"], len(b'{"ok":true}'))
+            self.assertEqual(rec["workload"], "unit-chat")
+            self.assertEqual(rec["cache_state"], "cold")
+            self.assertEqual(rec["interference_arm"], "solo")
+            self.assertEqual(rec["input_tokens"], 11)
+            self.assertEqual(rec["reusable_prefix_tokens"], 0)
+            self.assertEqual(rec["new_prefill_tokens"], 11)
+            self.assertEqual(rec["output_target_tokens"], 8)
+            self.assertEqual(rec["scheduler"]["policy"], "safe-affinity-live-state-v1")
+            self.assertEqual(rec["scheduler"]["selected_reason"], "live_state_lexicographic")
+            self.assertEqual(rec["scheduler"]["session_turn"], 1)
+            self.assertEqual(rec["scheduler"]["queued_request_count"], 0)
+            self.assertEqual(rec["scheduler"]["lane_components"][0]["lane_index"], 0)
+            self.assertEqual(rec["scheduler"]["lane_components"][0]["estimated_reusable_prefix_bytes"], 0)
             self.assertLessEqual(rec["queue_enter_unix_ns"], rec["admitted_unix_ns"])
-            self.assertLessEqual(rec["admitted_unix_ns"], rec["released_unix_ns"])
+            self.assertLessEqual(rec["admitted_unix_ns"], rec["lane_start_unix_ns"])
+            self.assertLessEqual(rec["lane_start_unix_ns"], rec["response_first_byte_unix_ns"])
+            self.assertLessEqual(rec["response_first_byte_unix_ns"], rec["released_unix_ns"])
             self.assertEqual(records[1]["run_id"], "run-b")
             self.assertEqual(records[1]["admission_rank"], 0)
+            self.assertEqual(records[1]["scheduler"]["selected_reason"], "session_affinity")
+            self.assertEqual(records[1]["scheduler"]["session_turn"], 2)
+            self.assertGreater(
+                records[1]["scheduler"]["lane_components"][0]["estimated_reusable_prefix_bytes"], 0
+            )
+
+    def test_prompt_signature_estimates_only_exact_leading_messages(self):
+        first = json.dumps({
+            "messages": [
+                {"role": "system", "content": "rules"},
+                {"role": "user", "content": "first"},
+            ]
+        }).encode()
+        continuation = json.dumps({
+            "messages": [
+                {"role": "system", "content": "rules"},
+                {"role": "user", "content": "first"},
+                {"role": "assistant", "content": "answer"},
+                {"role": "user", "content": "next"},
+            ]
+        }).encode()
+        changed = json.dumps({
+            "messages": [
+                {"role": "system", "content": "different"},
+                {"role": "user", "content": "first"},
+            ]
+        }).encode()
+        base = M.request_prompt_signature(first)
+        later = M.request_prompt_signature(continuation)
+        self.assertEqual(M.reusable_prefix_bytes(later, base), sum(size for _hash, size in base))
+        self.assertEqual(M.reusable_prefix_bytes(M.request_prompt_signature(changed), base), 0)
+        self.assertNotIn("rules", repr(base))
+        self.assertTrue(M.request_is_streaming(b'{"stream":true}'))
+        self.assertFalse(M.request_is_streaming(b'{"stream":false}'))
 
     def test_parse_vision_lane_indices(self):
         self.assertEqual(M.parse_lane_indices("1", 3, what="--vision-lanes"), {1})
@@ -417,6 +479,30 @@ class MultiGpuPlanningTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(result[0].index, 1)
         pool.release(result[0], affinity_key="new-chat", request_bytes=500)
+
+    def test_queue_status_counts_waiting_work_without_changing_fifo(self):
+        lane = M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess(), busy=True)
+        pool = M.LanePool([lane])
+        acquired = []
+        thread = threading.Thread(
+            target=lambda: acquired.append(pool.acquire(affinity_key="queued", request_bytes=4321))
+        )
+        thread.start()
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            status = pool.queue_status()
+            if status["new_session_waiters"] == 1:
+                break
+            time.sleep(0.005)
+        status = pool.queue_status()
+        self.assertEqual(status["new_session_waiters"], 1)
+        self.assertEqual(status["queued_request_bytes"], 4321)
+        self.assertEqual(status["busy_lanes"], 1)
+        pool.release(lane, affinity_key="initial", request_bytes=10)
+        thread.join(1.0)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(acquired[0].index, 0)
+        pool.release(acquired[0], affinity_key="queued", request_bytes=4321)
 
     def test_unidentified_live_state_is_not_treated_as_empty(self):
         lanes = [
