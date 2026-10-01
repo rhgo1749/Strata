@@ -263,6 +263,50 @@ def request_affinity_key(body: bytes, headers=None) -> str | None:
     return None
 
 
+def request_prompt_signature(body: bytes) -> tuple[tuple[str, int], ...]:
+    """Return privacy-safe exact-message prefix units for routing-history reuse estimates.
+
+    This is deliberately not called a token/KV-cache measurement.  Each message is
+    canonicalized, hashed, and paired with its UTF-8 byte length.  Matching leading
+    units therefore estimate how much conversation history is identical to the last
+    request served by a lane without retaining prompt text in the supervisor.
+    """
+    try:
+        req = json.loads(body) if body else {}
+    except (TypeError, ValueError):
+        return ()
+    if not isinstance(req, dict):
+        return ()
+    messages = req.get("messages")
+    if not isinstance(messages, list):
+        return ()
+    out: list[tuple[str, int]] = []
+    for message in messages:
+        canonical = json.dumps(message, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        encoded = canonical.encode("utf-8")
+        out.append((hashlib.sha256(encoded).hexdigest(), len(encoded)))
+    return tuple(out)
+
+
+def reusable_prefix_bytes(current: tuple[tuple[str, int], ...],
+                          previous: tuple[tuple[str, int], ...]) -> int:
+    """Count canonical message bytes in the exact common leading history."""
+    total = 0
+    for (current_hash, current_bytes), (previous_hash, _previous_bytes) in zip(current, previous):
+        if current_hash != previous_hash:
+            break
+        total += current_bytes
+    return total
+
+
+def request_is_streaming(body: bytes) -> bool:
+    try:
+        req = json.loads(body) if body else {}
+    except (TypeError, ValueError):
+        return False
+    return isinstance(req, dict) and req.get("stream") is True
+
+
 def lane_contexts(base_context: int, lanes: int, requested: str | None, kv_budget: int | None) -> list[int]:
     if requested:
         values = parse_int_list(requested, what="--lane-contexts")
@@ -341,6 +385,30 @@ def _set_process_affinity(cpus: tuple[int, ...]) -> None:
     os.sched_setaffinity(0, set(cpus))
 
 
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def repository_head(root: Path = ROOT) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
 def default_state_dir(config: Path, gpus: list[str]) -> Path:
     key = hashlib.sha256(
         (str(config.resolve()) + "\0" + ",".join(gpus)).encode("utf-8")
@@ -376,6 +444,24 @@ class Lane:
     live_affinity_key: str | None = None
     live_request_bytes: int = 0
     live_sequence: int = 0
+    live_prompt_signature: tuple[tuple[str, int], ...] = ()
+
+
+@dataclass(frozen=True)
+class Waiter:
+    requires_vision: bool
+    request_bytes: int
+    entered_mono_ns: int
+
+
+@dataclass
+class ProxyObservation:
+    status: int | None = None
+    first_byte_mono_ns: int | None = None
+    first_byte_unix_ns: int | None = None
+    response_bytes: int = 0
+    completion_reason: str = "proxy_error"
+    error: str | None = None
 
 
 class BenchmarkTrace:
@@ -391,6 +477,25 @@ class BenchmarkTrace:
         with self.lock:
             with self.path.open("a", encoding="utf-8") as f:
                 f.write(line)
+
+
+def benchmark_console_summary(record: dict) -> str:
+    """Human-readable one-line benchmark summary without prompt/session identifiers."""
+
+    def ms(value) -> str:
+        return "-" if value is None else f"{float(value):.1f}ms"
+
+    scheduler = record.get("scheduler") if isinstance(record.get("scheduler"), dict) else {}
+    return (
+        "[strata-multigpu][bench] "
+        f"lane={record.get('lane_index', '-')} "
+        f"reason={scheduler.get('selected_reason', '-')} "
+        f"queue={ms(record.get('queue_wait_ms'))} "
+        f"ttft={ms(record.get('ttft_ms'))} "
+        f"e2e={ms(record.get('e2e_ms'))} "
+        f"status={record.get('http_status', '-')} "
+        f"result={record.get('completion_reason', '-')}"
+    )
 
 
 def lane_engine_alive(lane: Lane, timeout: float = 0.2) -> bool:
@@ -415,8 +520,9 @@ class LanePool:
         self.vision_waiters = 0
         self.max_affinity_entries = max_affinity_entries or max(16, len(lanes) * 8)
         self.affinity: OrderedDict[str, int] = OrderedDict()
+        self.session_turns: OrderedDict[str, int] = OrderedDict()
         self.affinity_waiters: dict[int, int] = {lane.index: 0 for lane in lanes}
-        self.waiters: OrderedDict[int, bool] = OrderedDict()
+        self.waiters: OrderedDict[int, Waiter] = OrderedDict()
         self.next_wait_ticket = 0
         self.sequence = 0
 
@@ -424,17 +530,27 @@ class LanePool:
         self.affinity[key] = lane_index
         self.affinity.move_to_end(key)
         while len(self.affinity) > self.max_affinity_entries:
-            self.affinity.popitem(last=False)
+            old_key, _ = self.affinity.popitem(last=False)
+            self.session_turns.pop(old_key, None)
 
     def _drop_dead_affinity(self, alive_indices: set[int]) -> None:
         for key, lane_index in list(self.affinity.items()):
             if lane_index not in alive_indices:
                 del self.affinity[key]
+                self.session_turns.pop(key, None)
 
-    def _register_waiter(self, requires_vision: bool) -> int:
+    def _advance_session_turn(self, key: str | None) -> int | None:
+        if key is None:
+            return None
+        turn = self.session_turns.get(key, 0) + 1
+        self.session_turns[key] = turn
+        self.session_turns.move_to_end(key)
+        return turn
+
+    def _register_waiter(self, requires_vision: bool, request_bytes: int) -> int:
         ticket = self.next_wait_ticket
         self.next_wait_ticket += 1
-        self.waiters[ticket] = requires_vision
+        self.waiters[ticket] = Waiter(requires_vision, max(0, request_bytes), time.monotonic_ns())
         return ticket
 
     def _drop_waiter(self, ticket: int | None) -> None:
@@ -442,18 +558,67 @@ class LanePool:
             self.waiters.pop(ticket, None)
 
     def _earlier_waiter_can_use(self, ticket: int, lane: Lane) -> bool:
-        for other_ticket, other_requires_vision in self.waiters.items():
+        for other_ticket, waiter in self.waiters.items():
             if other_ticket == ticket:
                 break
-            if other_requires_vision and not lane.vision:
+            if waiter.requires_vision and not lane.vision:
                 continue
-            if not other_requires_vision and lane.vision and self.vision_waiters:
+            if not waiter.requires_vision and lane.vision and self.vision_waiters:
                 continue
             return True
         return False
 
+    def _decision_record(self, *, alive: list[Lane], eligible: list[Lane], selected: Lane,
+                         selected_reason: str, request_bytes: int,
+                         prompt_signature: tuple[tuple[str, int], ...],
+                         session_turn: int | None) -> dict:
+        alive_indices = {lane.index for lane in alive}
+        eligible_indices = {lane.index for lane in eligible}
+        prompt_bytes = sum(size for _digest, size in prompt_signature)
+        lane_components = []
+        for position, lane in enumerate(self.lanes):
+            reuse_bytes = reusable_prefix_bytes(prompt_signature, lane.live_prompt_signature)
+            rotation_offset = (position - self.cursor) % len(self.lanes)
+            placement_key = [
+                0 if lane.live_request_bytes == 0 else 1,
+                lane.live_request_bytes,
+                lane.live_sequence,
+                rotation_offset,
+            ]
+            lane_components.append({
+                "lane_index": lane.index,
+                "alive": lane.index in alive_indices,
+                "eligible": lane.index in eligible_indices,
+                "busy": lane.busy,
+                "vision": lane.vision,
+                "affinity_waiters": self.affinity_waiters.get(lane.index, 0),
+                "live_request_bytes": lane.live_request_bytes,
+                "live_sequence": lane.live_sequence,
+                "rotation_offset": rotation_offset,
+                "estimated_reusable_prefix_bytes": reuse_bytes,
+                "estimated_new_prefill_bytes": max(0, prompt_bytes - reuse_bytes),
+                "placement_key": placement_key,
+            })
+        selected_component = next(x for x in lane_components if x["lane_index"] == selected.index)
+        return {
+            "policy": "safe-affinity-live-state-v1",
+            "selected_reason": selected_reason,
+            "session_turn": session_turn,
+            "request_bytes": max(0, request_bytes),
+            "prompt_message_bytes": prompt_bytes,
+            "reuse_estimate_source": "routing_history_exact_message_prefix_bytes_v1",
+            "active_lane_count": sum(1 for lane in alive if lane.busy),
+            "queued_request_count": len(self.waiters),
+            "queued_request_bytes": sum(waiter.request_bytes for waiter in self.waiters.values()),
+            "affinity_waiter_count": sum(self.affinity_waiters.values()),
+            "selected_placement_key": selected_component["placement_key"],
+            "lane_components": lane_components,
+        }
+
     def acquire(self, *, requires_vision: bool = False, affinity_key: str | None = None,
-                request_bytes: int = 0) -> Lane:
+                request_bytes: int = 0,
+                prompt_signature: tuple[tuple[str, int], ...] = (),
+                decision_out: dict | None = None) -> Lane:
         with self.cv:
             wait_ticket: int | None = None
             reserved_lane_index: int | None = None
@@ -478,6 +643,7 @@ class LanePool:
                         preferred = self.lanes[self.affinity[affinity_key]]
                         if requires_vision and not preferred.vision:
                             del self.affinity[affinity_key]
+                            self.session_turns.pop(affinity_key, None)
                             if reserved_lane_index is not None:
                                 self.affinity_waiters[reserved_lane_index] -= 1
                                 reserved_lane_index = None
@@ -495,12 +661,23 @@ class LanePool:
                                 self.affinity_waiters[reserved_lane_index] -= 1
                                 reserved_lane_index = None
                             self.affinity.move_to_end(affinity_key)
+                            session_turn = self._advance_session_turn(affinity_key)
+                            if decision_out is not None:
+                                decision_out.update(self._decision_record(
+                                    alive=alive,
+                                    eligible=eligible,
+                                    selected=preferred,
+                                    selected_reason="session_affinity",
+                                    request_bytes=request_bytes,
+                                    prompt_signature=prompt_signature,
+                                    session_turn=session_turn,
+                                ))
                             preferred.busy = True
                             self.cv.notify_all()
                             return preferred
 
                     if wait_ticket is None:
-                        wait_ticket = self._register_waiter(requires_vision)
+                        wait_ticket = self._register_waiter(requires_vision, request_bytes)
                     candidates: list[tuple[int, Lane]] = []
                     for offset in range(len(self.lanes)):
                         idx = (self.cursor + offset) % len(self.lanes)
@@ -527,6 +704,17 @@ class LanePool:
                             self._remember_affinity(affinity_key, lane.index)
                         self._drop_waiter(wait_ticket)
                         wait_ticket = None
+                        session_turn = self._advance_session_turn(affinity_key)
+                        if decision_out is not None:
+                            decision_out.update(self._decision_record(
+                                alive=alive,
+                                eligible=eligible,
+                                selected=lane,
+                                selected_reason="live_state_lexicographic",
+                                request_bytes=request_bytes,
+                                prompt_signature=prompt_signature,
+                                session_turn=session_turn,
+                            ))
                         lane.busy = True
                         self.cursor = (idx + 1) % len(self.lanes)
                         self.cv.notify_all()
@@ -540,12 +728,14 @@ class LanePool:
                     self.vision_waiters -= 1
                 self.cv.notify_all()
 
-    def release(self, lane: Lane, *, affinity_key: str | None = None, request_bytes: int = 0) -> None:
+    def release(self, lane: Lane, *, affinity_key: str | None = None, request_bytes: int = 0,
+                prompt_signature: tuple[tuple[str, int], ...] = ()) -> None:
         with self.cv:
             self.sequence += 1
             lane.live_affinity_key = affinity_key
             lane.live_request_bytes = max(0, request_bytes)
             lane.live_sequence = self.sequence
+            lane.live_prompt_signature = prompt_signature
             lane.busy = False
             self.cv.notify_all()
 
@@ -584,6 +774,16 @@ class LanePool:
     def queue_depth(self) -> int:
         with self.cv:
             return len(self.waiters)
+
+    def queue_status(self) -> dict:
+        with self.cv:
+            return {
+                "new_session_waiters": len(self.waiters),
+                "queued_request_bytes": sum(waiter.request_bytes for waiter in self.waiters.values()),
+                "affinity_waiters": sum(self.affinity_waiters.values()),
+                "vision_waiters": self.vision_waiters,
+                "busy_lanes": sum(1 for lane in self.lanes if lane.busy),
+            }
 
 
 def require_ports_free(host: str, ports: list[int]) -> None:
@@ -659,6 +859,16 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
             admission_counters[key] = rank + 1
             return rank
 
+    def benchmark_header_int(headers, name: str) -> int | None:
+        value = headers.get(name)
+        if value in (None, ""):
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed >= 0 else None
+
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -683,6 +893,7 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                 "kv_budget": kv_budget,
                 "lane_context_total": sum(x.context for x in pool.lanes),
                 "queue_depth": pool.queue_depth(),
+                "queue": pool.queue_status(),
                 "bench_trace_jsonl": str(bench_trace.path) if bench_trace else None,
                 "lanes": pool.status(),
             })
@@ -700,12 +911,18 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
             n = int(self.headers.get("Content-Length", "0") or 0)
             return self.rfile.read(n) if n else b""
 
-        def _proxy(self, lane: Lane, body: bytes | None = None, extra_headers: dict[str, str] | None = None):
+        def _proxy(self, lane: Lane, body: bytes | None = None,
+                   extra_headers: dict[str, str] | None = None) -> ProxyObservation:
+            observation = ProxyObservation()
             if body is None:
                 try:
                     body = self._body()
                 except ValueError as e:
-                    return self._json(411, {"error": {"message": str(e)}})
+                    observation.status = 411
+                    observation.completion_reason = "request_rejected"
+                    observation.error = str(e)
+                    self._json(411, {"error": {"message": str(e)}})
+                    return observation
 
             headers = {
                 k: v for k, v in self.headers.items()
@@ -715,6 +932,7 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
             try:
                 conn.request(self.command, self.path, body=body, headers=headers)
                 resp = conn.getresponse()
+                observation.status = resp.status
                 self.send_response(resp.status, resp.reason)
                 for k, v in (extra_headers or {}).items():
                     self.send_header(k, v)
@@ -735,16 +953,26 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                         chunk = resp.read1(64 * 1024)
                         if not chunk:
                             break
+                        if observation.first_byte_mono_ns is None:
+                            observation.first_byte_mono_ns = time.monotonic_ns()
+                            observation.first_byte_unix_ns = time.time_ns()
+                        observation.response_bytes += len(chunk)
                         self.wfile.write(chunk)
                         self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
+                observation.completion_reason = "completed"
+            except (BrokenPipeError, ConnectionResetError) as e:
+                observation.completion_reason = "client_disconnect"
+                observation.error = type(e).__name__
                 self.close_connection = True
             except Exception as e:
+                observation.completion_reason = "proxy_error"
+                observation.error = f"{type(e).__name__}: {e}"
                 if not self.wfile.closed:
                     self.close_connection = True
                     print(f"[strata-multigpu] lane {lane.index} proxy error: {e}", flush=True)
             finally:
                 conn.close()
+            return observation
 
         def _dispatch(self):
             path = self.path.split("?", 1)[0]
@@ -758,15 +986,28 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
             body = None
             requires_vision = False
             affinity_key = None
+            prompt_signature: tuple[tuple[str, int], ...] = ()
+            streaming = False
             request_id = None
             run_id = None
             submit_rank = None
+            workload = None
+            cache_state = None
+            interference_arm = None
+            input_tokens = None
+            reusable_prefix_tokens = None
+            new_prefill_tokens = None
+            output_target_tokens = None
             queue_enter_mono_ns = None
             queue_enter_unix_ns = None
             admitted_mono_ns = None
             admitted_unix_ns = None
+            lane_start_mono_ns = None
+            lane_start_unix_ns = None
             admission_rank = None
             queue_wait_ms = None
+            decision: dict = {}
+            proxy_observation = ProxyObservation(completion_reason="not_started")
             if leased:
                 try:
                     body = self._body()
@@ -774,9 +1015,24 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                     return self._json(411, {"error": {"message": str(e)}})
                 requires_vision = request_has_images(body)
                 affinity_key = request_affinity_key(body, self.headers)
+                prompt_signature = request_prompt_signature(body)
+                streaming = request_is_streaming(body)
                 request_id = next_request_id(self.headers.get("X-Strata-Benchmark-Request-Id"))
                 run_id = self.headers.get("X-Strata-Benchmark-Run-Id")
                 submit_rank = self.headers.get("X-Strata-Benchmark-Submit-Rank")
+                workload = self.headers.get("X-Strata-Benchmark-Workload")
+                cache_state = self.headers.get("X-Strata-Benchmark-Cache-State")
+                interference_arm = self.headers.get("X-Strata-Benchmark-Interference-Arm")
+                input_tokens = benchmark_header_int(self.headers, "X-Strata-Benchmark-Input-Tokens")
+                reusable_prefix_tokens = benchmark_header_int(
+                    self.headers, "X-Strata-Benchmark-Reusable-Prefix-Tokens"
+                )
+                new_prefill_tokens = benchmark_header_int(
+                    self.headers, "X-Strata-Benchmark-New-Prefill-Tokens"
+                )
+                output_target_tokens = benchmark_header_int(
+                    self.headers, "X-Strata-Benchmark-Output-Target-Tokens"
+                )
                 queue_enter_mono_ns = time.monotonic_ns()
                 queue_enter_unix_ns = time.time_ns()
             try:
@@ -785,6 +1041,8 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                         requires_vision=requires_vision,
                         affinity_key=affinity_key,
                         request_bytes=len(body or b""),
+                        prompt_signature=prompt_signature,
+                        decision_out=decision,
                     )
                     admitted_mono_ns = time.monotonic_ns()
                     admitted_unix_ns = time.time_ns()
@@ -798,7 +1056,12 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                 return self._json(503, {"error": {"message": str(e)}})
             try:
                 if not lane_engine_alive(lane):
-                    return self._json(503, {"error": {"message": f"GPU lane {lane.index} is not running"}})
+                    proxy_observation = ProxyObservation(
+                        status=503,
+                        completion_reason="lane_unavailable",
+                        error=f"GPU lane {lane.index} is not running",
+                    )
+                    return self._json(503, {"error": {"message": proxy_observation.error}})
                 extra_headers = None
                 if leased:
                     extra_headers = {
@@ -807,15 +1070,32 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                         "X-Strata-Queue-Wait-Ms": f"{queue_wait_ms:.3f}",
                         "X-Strata-Benchmark-Request-Id": str(request_id),
                     }
-                self._proxy(lane, body=body, extra_headers=extra_headers)
+                    lane_start_mono_ns = time.monotonic_ns()
+                    lane_start_unix_ns = time.time_ns()
+                proxy_observation = self._proxy(lane, body=body, extra_headers=extra_headers)
             finally:
                 if leased:
                     released_mono_ns = time.monotonic_ns()
                     released_unix_ns = time.time_ns()
-                    pool.release(lane, affinity_key=affinity_key, request_bytes=len(body or b""))
+                    pool.release(
+                        lane,
+                        affinity_key=affinity_key,
+                        request_bytes=len(body or b""),
+                        prompt_signature=prompt_signature,
+                    )
                     if bench_trace is not None:
-                        bench_trace.write({
+                        first_byte_ms = (
+                            (proxy_observation.first_byte_mono_ns - queue_enter_mono_ns) / 1e6
+                            if proxy_observation.first_byte_mono_ns is not None else None
+                        )
+                        lane_first_byte_ms = (
+                            (proxy_observation.first_byte_mono_ns - lane_start_mono_ns) / 1e6
+                            if proxy_observation.first_byte_mono_ns is not None
+                            and lane_start_mono_ns is not None else None
+                        )
+                        trace_record = {
                             "kind": "lane_lease",
+                            "trace_schema": 2,
                             "run_id": run_id,
                             "request_id": request_id,
                             "submit_rank": submit_rank,
@@ -824,13 +1104,35 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                             "gpu": lane.gpu,
                             "queue_enter_unix_ns": queue_enter_unix_ns,
                             "admitted_unix_ns": admitted_unix_ns,
+                            "lane_start_unix_ns": lane_start_unix_ns,
+                            "response_first_byte_unix_ns": proxy_observation.first_byte_unix_ns,
                             "released_unix_ns": released_unix_ns,
                             "queue_wait_ms": queue_wait_ms,
                             "service_ms": (released_mono_ns - admitted_mono_ns) / 1e6,
+                            "e2e_ms": (released_mono_ns - queue_enter_mono_ns) / 1e6,
+                            "response_first_byte_ms": first_byte_ms,
+                            "lane_first_byte_ms": lane_first_byte_ms,
+                            "ttft_ms": first_byte_ms if streaming else None,
+                            "ttft_source": "stream_response_first_byte" if streaming else None,
+                            "streaming": streaming,
+                            "http_status": proxy_observation.status,
+                            "response_bytes": proxy_observation.response_bytes,
+                            "completion_reason": proxy_observation.completion_reason,
+                            "error": proxy_observation.error,
                             "request_bytes": len(body or b""),
                             "requires_vision": requires_vision,
                             "affinity_key_prefix": affinity_key[:12] if affinity_key else None,
-                        })
+                            "workload": workload,
+                            "cache_state": cache_state,
+                            "interference_arm": interference_arm,
+                            "input_tokens": input_tokens,
+                            "reusable_prefix_tokens": reusable_prefix_tokens,
+                            "new_prefill_tokens": new_prefill_tokens,
+                            "output_target_tokens": output_target_tokens,
+                            "scheduler": decision,
+                        }
+                        bench_trace.write(trace_record)
+                        print(benchmark_console_summary(trace_record), flush=True)
 
         do_GET = _dispatch
         do_HEAD = _dispatch
@@ -1011,6 +1313,41 @@ def main() -> int:
     )
     print(f"[strata-multigpu] arena backing: {arena_file} ({spec.bytes:,} bytes)", flush=True)
     if bench_trace is not None:
+        bench_trace.write({
+            "kind": "benchmark_manifest",
+            "trace_schema": 2,
+            "created_unix_ns": time.time_ns(),
+            "fork_commit": repository_head(),
+            "python": sys.version.split()[0],
+            "platform": sys.platform,
+            "kernel": os.uname().release if hasattr(os, "uname") else None,
+            "config_path": str(config),
+            "config_sha256": file_sha256(config),
+            "pack_path": str(pack),
+            "shared_arena": not a.private_arena,
+            "arena_file": str(arena_file) if not a.private_arena else None,
+            "arena_bytes": spec.bytes,
+            "kv_budget": a.kv_budget,
+            "public_host": a.host,
+            "public_port": a.port,
+            "base_port": a.base_port,
+            "lanes": [
+                {
+                    "index": lane.index,
+                    "gpu": lane.gpu,
+                    "port": lane.port,
+                    "context": lane.context,
+                    "cpus": list(lane.cpus) if lane.cpus else None,
+                    "pcie_frac": lane.pcie_frac,
+                    "kv_resident": lane.kv_resident,
+                    "vision": lane.vision,
+                    "vram_reserve_mib": lane.vram_reserve_mib,
+                    "config_path": str(lane.config),
+                    "config_sha256": file_sha256(lane.config),
+                }
+                for lane in lanes
+            ],
+        })
         print(f"[strata-multigpu] benchmark lease trace: {bench_trace.path}", flush=True)
     if vision_lanes:
         print(
