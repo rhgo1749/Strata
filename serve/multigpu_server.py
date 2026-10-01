@@ -537,14 +537,38 @@ SCHEDULER_POLICIES = (
 )
 SCHEDULER_POLICIES_WITHOUT_TRACE = frozenset({SCHEDULER_POLICY_SAFE, SCHEDULER_POLICY_DEFAULT})
 
+ADMISSION_POLICY_UNBOUNDED = "unbounded-wait-v1"
+ADMISSION_POLICY_BOUNDED = "bounded-new-session-wait-v1"
+ADMISSION_POLICIES = (ADMISSION_POLICY_UNBOUNDED, ADMISSION_POLICY_BOUNDED)
+
+
+class AdmissionDeferred(RuntimeError):
+    def __init__(self, *, waited_ms: float, budget_ms: float, record: dict):
+        super().__init__(
+            f"new-session admission deferred after {waited_ms:.1f} ms "
+            f"(budget {budget_ms:.1f} ms)"
+        )
+        self.waited_ms = waited_ms
+        self.budget_ms = budget_ms
+        self.record = record
+
 
 class LanePool:
     def __init__(self, lanes: list[Lane], *, max_affinity_entries: int | None = None,
-                 scheduler_policy: str = SCHEDULER_POLICY_DEFAULT):
+                 scheduler_policy: str = SCHEDULER_POLICY_DEFAULT,
+                 admission_policy: str = ADMISSION_POLICY_UNBOUNDED,
+                 admission_wait_budget_ms: float | None = None):
         if scheduler_policy not in SCHEDULER_POLICIES:
             raise ValueError(f"unknown scheduler policy: {scheduler_policy}")
+        if admission_policy not in ADMISSION_POLICIES:
+            raise ValueError(f"unknown admission policy: {admission_policy}")
+        if admission_policy == ADMISSION_POLICY_BOUNDED:
+            if admission_wait_budget_ms is None or admission_wait_budget_ms <= 0:
+                raise ValueError("bounded admission requires a positive wait budget")
         self.lanes = lanes
         self.scheduler_policy = scheduler_policy
+        self.admission_policy = admission_policy
+        self.admission_wait_budget_ms = admission_wait_budget_ms
         self.cv = threading.Condition()
         self.cursor = 0
         self.vision_waiters = 0
@@ -609,6 +633,17 @@ class LanePool:
             sum(waiter.request_bytes for waiter in compatible),
             max(0.0, (now_ns - oldest_ns) / 1e6),
         )
+
+    def _admission_record(self, *, outcome: str, waited_ms: float) -> dict:
+        return {
+            "policy": self.admission_policy,
+            "policy_scope": "new_sessions_only",
+            "outcome": outcome,
+            "wait_budget_ms": self.admission_wait_budget_ms,
+            "waited_ms": max(0.0, waited_ms),
+            "queue_depth_at_decision": len(self.waiters),
+            "active_lane_count_at_decision": sum(1 for lane in self.lanes if lane.busy),
+        }
 
     def _earlier_waiter_can_use(self, ticket: int, lane: Lane) -> bool:
         for other_ticket, waiter in self.waiters.items():
@@ -765,6 +800,8 @@ class LanePool:
         with self.cv:
             wait_ticket: int | None = None
             reserved_lane_index: int | None = None
+            new_session_wait_started_ns: int | None = None
+            waited_for_capacity = False
             if requires_vision:
                 self.vision_waiters += 1
             try:
@@ -815,6 +852,13 @@ class LanePool:
                                     prompt_signature=prompt_signature,
                                     session_turn=session_turn,
                                 ))
+                                decision_out["admission"] = {
+                                    "policy": self.admission_policy,
+                                    "policy_scope": "new_sessions_only",
+                                    "outcome": "affinity_exempt",
+                                    "wait_budget_ms": self.admission_wait_budget_ms,
+                                    "waited_ms": None,
+                                }
                             self._start_lane_work(
                                 preferred,
                                 affinity_key=affinity_key,
@@ -826,6 +870,7 @@ class LanePool:
 
                     if wait_ticket is None:
                         wait_ticket = self._register_waiter(requires_vision, request_bytes)
+                        new_session_wait_started_ns = time.monotonic_ns()
                     candidates: list[tuple[int, Lane]] = []
                     for offset in range(len(self.lanes)):
                         idx = (self.cursor + offset) % len(self.lanes)
@@ -870,6 +915,14 @@ class LanePool:
                                 prompt_signature=prompt_signature,
                                 session_turn=session_turn,
                             ))
+                            waited_ms = (
+                                (time.monotonic_ns() - new_session_wait_started_ns) / 1e6
+                                if new_session_wait_started_ns is not None else 0.0
+                            )
+                            decision_out["admission"] = self._admission_record(
+                                outcome="wait_then_route" if waited_for_capacity else "route_now",
+                                waited_ms=waited_ms,
+                            )
                         if affinity_key is not None:
                             self._remember_affinity(affinity_key, lane.index)
                         self._start_lane_work(
@@ -881,7 +934,24 @@ class LanePool:
                         self.cursor = (idx + 1) % len(self.lanes)
                         self.cv.notify_all()
                         return lane
-                    self.cv.wait(timeout=1.0)
+                    wait_timeout_s = 1.0
+                    if (
+                        self.admission_policy == ADMISSION_POLICY_BOUNDED
+                        and new_session_wait_started_ns is not None
+                    ):
+                        waited_ms = (time.monotonic_ns() - new_session_wait_started_ns) / 1e6
+                        budget_ms = float(self.admission_wait_budget_ms or 0.0)
+                        remaining_ms = budget_ms - waited_ms
+                        if remaining_ms <= 0:
+                            record = self._admission_record(outcome="defer", waited_ms=waited_ms)
+                            raise AdmissionDeferred(
+                                waited_ms=waited_ms,
+                                budget_ms=budget_ms,
+                                record=record,
+                            )
+                        wait_timeout_s = min(wait_timeout_s, remaining_ms / 1000.0)
+                    waited_for_capacity = True
+                    self.cv.wait(timeout=wait_timeout_s)
             finally:
                 self._drop_waiter(wait_ticket)
                 if reserved_lane_index is not None:
@@ -1054,11 +1124,13 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
         def log_message(self, fmt, *args):
             print("[strata-multigpu] " + (fmt % args), flush=True)
 
-        def _json(self, status: int, value) -> None:
+        def _json(self, status: int, value, extra_headers: dict[str, str] | None = None) -> None:
             body = json.dumps(value).encode()
             self.send_response(status)
             self.send_header("content-type", "application/json")
             self.send_header("content-length", str(len(body)))
+            for key, header_value in (extra_headers or {}).items():
+                self.send_header(key, header_value)
             self.end_headers()
             if self.command != "HEAD":
                 self.wfile.write(body)
@@ -1076,6 +1148,8 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                 "bench_trace_jsonl": str(bench_trace.path) if bench_trace else None,
                 "bench_console_summary": bench_console_summary,
                 "scheduler_policy": pool.scheduler_policy,
+                "admission_policy": pool.admission_policy,
+                "admission_wait_budget_ms": pool.admission_wait_budget_ms,
                 "lanes": pool.status(),
             })
 
@@ -1233,6 +1307,68 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                     lane = pool.metadata_lane(lane0)
                 else:
                     lane = lane0
+            except AdmissionDeferred as e:
+                deferred_mono_ns = time.monotonic_ns()
+                deferred_unix_ns = time.time_ns()
+                queue_wait_ms = (deferred_mono_ns - queue_enter_mono_ns) / 1e6
+                trace_record = {
+                    "kind": "admission_defer",
+                    "trace_schema": 2,
+                    "run_id": run_id,
+                    "request_id": request_id,
+                    "submit_rank": submit_rank,
+                    "admission_rank": None,
+                    "lane_index": None,
+                    "gpu": None,
+                    "queue_enter_unix_ns": queue_enter_unix_ns,
+                    "admitted_unix_ns": None,
+                    "lane_start_unix_ns": None,
+                    "response_first_byte_unix_ns": None,
+                    "released_unix_ns": deferred_unix_ns,
+                    "queue_wait_ms": queue_wait_ms,
+                    "service_ms": None,
+                    "e2e_ms": queue_wait_ms,
+                    "response_first_byte_ms": None,
+                    "lane_first_byte_ms": None,
+                    "ttft_ms": None,
+                    "ttft_source": None,
+                    "streaming": streaming,
+                    "http_status": 429,
+                    "response_bytes": 0,
+                    "completion_reason": "admission_deferred",
+                    "error": str(e),
+                    "request_bytes": len(body or b""),
+                    "requires_vision": requires_vision,
+                    "affinity_key_prefix": affinity_key[:12] if affinity_key else None,
+                    "workload": workload,
+                    "cache_state": cache_state,
+                    "interference_arm": interference_arm,
+                    "input_tokens": input_tokens,
+                    "reusable_prefix_tokens": reusable_prefix_tokens,
+                    "new_prefill_tokens": new_prefill_tokens,
+                    "output_target_tokens": output_target_tokens,
+                    "scheduler": {
+                        "policy": pool.scheduler_policy,
+                        "admission": e.record,
+                    },
+                }
+                if bench_trace is not None:
+                    bench_trace.write(trace_record)
+                if bench_console_summary:
+                    print(benchmark_console_summary(trace_record), flush=True)
+                return self._json(
+                    429,
+                    {"error": {
+                        "message": str(e),
+                        "type": "admission_deferred",
+                        "retryable": True,
+                    }},
+                    extra_headers={
+                        "X-Strata-Admission-Decision": "defer",
+                        "X-Strata-Queue-Wait-Ms": f"{queue_wait_ms:.3f}",
+                        "X-Strata-Benchmark-Request-Id": str(request_id),
+                    },
+                )
             except RuntimeError as e:
                 return self._json(503, {"error": {"message": str(e)}})
             try:
@@ -1249,6 +1385,9 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                         "X-Strata-Lane-Index": str(lane.index),
                         "X-Strata-Admission-Rank": str(admission_rank),
                         "X-Strata-Queue-Wait-Ms": f"{queue_wait_ms:.3f}",
+                        "X-Strata-Admission-Decision": str(
+                            (decision.get("admission") or {}).get("outcome") or "admitted"
+                        ),
                         "X-Strata-Benchmark-Request-Id": str(request_id),
                     }
                     lane_start_mono_ns = time.monotonic_ns()
@@ -1379,10 +1518,31 @@ def main() -> int:
             "experimental policies require --bench-trace-jsonl"
         ),
     )
+    ap.add_argument(
+        "--bench-admission-policy",
+        choices=ADMISSION_POLICIES,
+        default=ADMISSION_POLICY_UNBOUNDED,
+        help=(
+            "benchmark admission control for new sessions only; bounded policy returns HTTP 429 "
+            "after --bench-admission-wait-ms while existing-session affinity remains exempt"
+        ),
+    )
+    ap.add_argument(
+        "--bench-admission-wait-ms",
+        type=float,
+        help="positive new-session wait budget for bounded benchmark admission",
+    )
     a = ap.parse_args()
 
     if a.bench_scheduler_policy not in SCHEDULER_POLICIES_WITHOUT_TRACE and not a.bench_trace_jsonl:
         ap.error("experimental --bench-scheduler-policy requires --bench-trace-jsonl")
+    if a.bench_admission_policy == ADMISSION_POLICY_BOUNDED:
+        if not a.bench_trace_jsonl:
+            ap.error("bounded --bench-admission-policy requires --bench-trace-jsonl")
+        if a.bench_admission_wait_ms is None or a.bench_admission_wait_ms <= 0:
+            ap.error("bounded --bench-admission-policy requires positive --bench-admission-wait-ms")
+    elif a.bench_admission_wait_ms is not None:
+        ap.error("--bench-admission-wait-ms requires bounded --bench-admission-policy")
     if os.name == "nt":
         ap.error("the shared expert arena v1 is Linux-only")
     config = Path(a.config).expanduser().resolve()
@@ -1609,7 +1769,12 @@ def main() -> int:
             wait_ready(lane, a.startup_timeout)
             print(f"[strata-multigpu] lane {lane.index} ready", flush=True)
 
-        pool = LanePool(lanes, scheduler_policy=a.bench_scheduler_policy)
+        pool = LanePool(
+            lanes,
+            scheduler_policy=a.bench_scheduler_policy,
+            admission_policy=a.bench_admission_policy,
+            admission_wait_budget_ms=a.bench_admission_wait_ms,
+        )
         httpd = ThreadingHTTPServer(
             (a.host, a.port),
             make_handler(

@@ -719,6 +719,8 @@ class MultiGpuPlanningTests(unittest.TestCase):
                 self.assertEqual(got.index, expected_lane)
                 self.assertEqual(decision["policy"], policy)
                 self.assertEqual(decision["policy_scope"], "new_session_idle_lane_only")
+                self.assertEqual(decision["admission"]["policy"], M.ADMISSION_POLICY_UNBOUNDED)
+                self.assertEqual(decision["admission"]["outcome"], "route_now")
                 self.assertEqual(
                     decision["selected_reason"],
                     (
@@ -833,6 +835,56 @@ class MultiGpuPlanningTests(unittest.TestCase):
         lane = M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess())
         with self.assertRaisesRegex(ValueError, "unknown scheduler policy"):
             M.LanePool([lane], scheduler_policy="mystery")
+
+    def test_unknown_admission_policy_is_rejected(self):
+        lane = M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess())
+        with self.assertRaisesRegex(ValueError, "unknown admission policy"):
+            M.LanePool([lane], admission_policy="mystery")
+
+    def test_bounded_admission_defers_only_new_session_after_budget(self):
+        lane = M.Lane(
+            0, "0", 19086, 262144, Path("lane0.json"),
+            process=_AliveProcess(), busy=True,
+        )
+        pool = M.LanePool(
+            [lane],
+            admission_policy=M.ADMISSION_POLICY_BOUNDED,
+            admission_wait_budget_ms=20.0,
+        )
+        start = time.monotonic()
+        with self.assertRaises(M.AdmissionDeferred) as raised:
+            pool.acquire(affinity_key="new-session", request_bytes=500)
+        elapsed_ms = (time.monotonic() - start) * 1000.0
+        self.assertGreaterEqual(raised.exception.waited_ms, 15.0)
+        self.assertLess(elapsed_ms, 500.0)
+        self.assertEqual(raised.exception.record["outcome"], "defer")
+        self.assertEqual(raised.exception.record["policy"], M.ADMISSION_POLICY_BOUNDED)
+        self.assertEqual(pool.queue_depth(), 0)
+
+    def test_bounded_admission_exempts_existing_session_affinity(self):
+        lane = M.Lane(
+            0, "0", 19086, 262144, Path("lane0.json"),
+            process=_AliveProcess(), busy=True,
+        )
+        pool = M.LanePool(
+            [lane],
+            admission_policy=M.ADMISSION_POLICY_BOUNDED,
+            admission_wait_budget_ms=5.0,
+        )
+        pool.affinity["returning"] = 0
+        decision = {}
+
+        def release_later():
+            time.sleep(0.02)
+            pool.release(lane, affinity_key="prior-turn")
+
+        thread = threading.Thread(target=release_later)
+        thread.start()
+        got = pool.acquire(affinity_key="returning", decision_out=decision)
+        thread.join(timeout=1.0)
+        self.assertIs(got, lane)
+        self.assertEqual(decision["admission"]["outcome"], "affinity_exempt")
+        pool.release(got, affinity_key="returning")
 
     def test_unidentified_live_state_is_not_treated_as_empty(self):
         lanes = [
