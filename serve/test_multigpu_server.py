@@ -253,6 +253,29 @@ class MultiGpuPlanningTests(unittest.TestCase):
                 records[1]["scheduler"]["lane_components"][0]["estimated_reusable_prefix_bytes"], 0
             )
 
+    def test_benchmark_console_summary_is_concise_and_privacy_safe(self):
+        record = {
+            "lane_index": 2,
+            "queue_wait_ms": 12.345,
+            "ttft_ms": 98.765,
+            "e2e_ms": 456.789,
+            "http_status": 200,
+            "completion_reason": "completed",
+            "request_id": "secret-request-label",
+            "affinity_key_prefix": "deadbeefcafe",
+            "scheduler": {"selected_reason": "session_affinity"},
+        }
+        summary = M.benchmark_console_summary(record)
+        self.assertIn("lane=2", summary)
+        self.assertIn("reason=session_affinity", summary)
+        self.assertIn("queue=12.3ms", summary)
+        self.assertIn("ttft=98.8ms", summary)
+        self.assertIn("e2e=456.8ms", summary)
+        self.assertIn("status=200", summary)
+        self.assertIn("result=completed", summary)
+        self.assertNotIn("secret-request-label", summary)
+        self.assertNotIn("deadbeefcafe", summary)
+
     def test_prompt_signature_estimates_only_exact_leading_messages(self):
         first = json.dumps({
             "messages": [

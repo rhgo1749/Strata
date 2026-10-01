@@ -479,6 +479,25 @@ class BenchmarkTrace:
                 f.write(line)
 
 
+def benchmark_console_summary(record: dict) -> str:
+    """Human-readable one-line benchmark summary without prompt/session identifiers."""
+
+    def ms(value) -> str:
+        return "-" if value is None else f"{float(value):.1f}ms"
+
+    scheduler = record.get("scheduler") if isinstance(record.get("scheduler"), dict) else {}
+    return (
+        "[strata-multigpu][bench] "
+        f"lane={record.get('lane_index', '-')} "
+        f"reason={scheduler.get('selected_reason', '-')} "
+        f"queue={ms(record.get('queue_wait_ms'))} "
+        f"ttft={ms(record.get('ttft_ms'))} "
+        f"e2e={ms(record.get('e2e_ms'))} "
+        f"status={record.get('http_status', '-')} "
+        f"result={record.get('completion_reason', '-')}"
+    )
+
+
 def lane_engine_alive(lane: Lane, timeout: float = 0.2) -> bool:
     """Return whether both the lane wrapper and its child engine currently expose the model."""
     if lane.process is None or lane.process.poll() is not None:
@@ -1074,7 +1093,7 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                             if proxy_observation.first_byte_mono_ns is not None
                             and lane_start_mono_ns is not None else None
                         )
-                        bench_trace.write({
+                        trace_record = {
                             "kind": "lane_lease",
                             "trace_schema": 2,
                             "run_id": run_id,
@@ -1111,7 +1130,9 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                             "new_prefill_tokens": new_prefill_tokens,
                             "output_target_tokens": output_target_tokens,
                             "scheduler": decision,
-                        })
+                        }
+                        bench_trace.write(trace_record)
+                        print(benchmark_console_summary(trace_record), flush=True)
 
         do_GET = _dispatch
         do_HEAD = _dispatch
