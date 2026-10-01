@@ -839,7 +839,8 @@ def stop_lane(lane: Lane) -> None:
 
 
 def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int, kv_budget: int | None,
-                 reject_generate_proxy: bool = False, bench_trace: BenchmarkTrace | None = None):
+                 reject_generate_proxy: bool = False, bench_trace: BenchmarkTrace | None = None,
+                 bench_console_summary: bool = False):
     counter_lock = threading.Lock()
     request_counter = 0
     admission_counters: dict[str, int] = {}
@@ -895,6 +896,7 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                 "queue_depth": pool.queue_depth(),
                 "queue": pool.queue_status(),
                 "bench_trace_jsonl": str(bench_trace.path) if bench_trace else None,
+                "bench_console_summary": bench_console_summary,
                 "lanes": pool.status(),
             })
 
@@ -1083,7 +1085,7 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                         request_bytes=len(body or b""),
                         prompt_signature=prompt_signature,
                     )
-                    if bench_trace is not None:
+                    if bench_trace is not None or bench_console_summary:
                         first_byte_ms = (
                             (proxy_observation.first_byte_mono_ns - queue_enter_mono_ns) / 1e6
                             if proxy_observation.first_byte_mono_ns is not None else None
@@ -1131,8 +1133,10 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                             "output_target_tokens": output_target_tokens,
                             "scheduler": decision,
                         }
-                        bench_trace.write(trace_record)
-                        print(benchmark_console_summary(trace_record), flush=True)
+                        if bench_trace is not None:
+                            bench_trace.write(trace_record)
+                        if bench_console_summary:
+                            print(benchmark_console_summary(trace_record), flush=True)
 
         do_GET = _dispatch
         do_HEAD = _dispatch
@@ -1184,6 +1188,8 @@ def main() -> int:
                     help="benchmark only: reject generation on the supervisor proxy; private lanes still work")
     ap.add_argument("--bench-trace-jsonl",
                     help="benchmark only: append exact lane lease timing records as JSONL")
+    ap.add_argument("--bench-console-summary", action="store_true",
+                    help="print concise per-request benchmark summaries to stdout without persistent trace storage")
     a = ap.parse_args()
 
     if os.name == "nt":
@@ -1413,8 +1419,16 @@ def main() -> int:
         pool = LanePool(lanes)
         httpd = ThreadingHTTPServer(
             (a.host, a.port),
-            make_handler(pool, lanes[0], arena_file, spec.bytes, a.kv_budget, a.reject_generate_proxy,
-                         bench_trace),
+            make_handler(
+                pool,
+                lanes[0],
+                arena_file,
+                spec.bytes,
+                a.kv_budget,
+                a.reject_generate_proxy,
+                bench_trace,
+                a.bench_console_summary,
+            ),
         )
         print(
             f"[strata-multigpu] ready: http://{a.host}:{a.port}/v1 "
