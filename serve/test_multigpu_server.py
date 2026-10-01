@@ -683,6 +683,7 @@ class MultiGpuPlanningTests(unittest.TestCase):
             "additive-new-prefill-retained-state-proxy-v1": 2,
             "multiplicative-new-prefill-retained-state-proxy-v1": 0,
             "session-start-balance-cache-aware-v1": 1,
+            "balanced-additive-new-prefill-retained-state-proxy-v1": 1,
         }
 
         for policy, expected_lane in expected.items():
@@ -742,6 +743,66 @@ class MultiGpuPlanningTests(unittest.TestCase):
                     request_bytes=500,
                     prompt_signature=incoming,
                 )
+
+    def test_balanced_additive_avoids_long_lived_session_start_attractor(self):
+        lanes = [
+            M.Lane(
+                0, "0", 19086, 262144, Path("lane0.json"),
+                process=_AliveProcess(),
+                live_request_bytes=15335,
+                live_sequence=11,
+                live_prompt_signature=(("shared", 14989), ("lane0", 346)),
+            ),
+            M.Lane(
+                1, "1", 19087, 262144, Path("lane1.json"),
+                process=_AliveProcess(),
+                live_request_bytes=15335,
+                live_sequence=12,
+                live_prompt_signature=(("shared", 14989), ("lane1", 346)),
+            ),
+            M.Lane(
+                2, "2", 19088, 262144, Path("lane2.json"),
+                process=_AliveProcess(),
+                live_request_bytes=15187,
+                live_sequence=10,
+                live_prompt_signature=(("shared", 14989), ("lane2", 198)),
+            ),
+        ]
+        pool = M.LanePool(
+            lanes,
+            scheduler_policy="balanced-additive-new-prefill-retained-state-proxy-v1",
+        )
+        pool.affinity.update({
+            "old-0a": 0,
+            "old-0b": 0,
+            "old-1a": 1,
+            "old-1b": 1,
+            "old-2a": 2,
+            "old-2b": 2,
+        })
+        incoming = (("shared", 14989), ("new", 123))
+        selected = []
+        for i in range(6):
+            key = f"new-{i}"
+            lane = pool.acquire(
+                affinity_key=key,
+                request_bytes=15112,
+                prompt_signature=incoming,
+            )
+            selected.append(lane.index)
+            pool.release(
+                lane,
+                affinity_key=key,
+                request_bytes=15112,
+                prompt_signature=incoming,
+            )
+
+        self.assertEqual({index: selected.count(index) for index in range(3)}, {0: 2, 1: 2, 2: 2})
+        affinity_counts = {
+            index: sum(1 for lane_index in pool.affinity.values() if lane_index == index)
+            for index in range(3)
+        }
+        self.assertEqual(affinity_counts, {0: 4, 1: 4, 2: 4})
 
     def test_benchmark_policy_does_not_override_existing_session_affinity(self):
         lanes = [

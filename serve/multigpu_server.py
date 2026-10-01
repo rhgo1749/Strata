@@ -532,6 +532,7 @@ SCHEDULER_POLICIES = (
     "additive-new-prefill-retained-state-proxy-v1",
     "multiplicative-new-prefill-retained-state-proxy-v1",
     "session-start-balance-cache-aware-v1",
+    "balanced-additive-new-prefill-retained-state-proxy-v1",
 )
 
 
@@ -667,6 +668,13 @@ class LanePool:
                 c["affinity_session_count"],
                 -reuse,
                 retained,
+                lane.live_sequence,
+                rotation,
+            )
+        if self.scheduler_policy == "balanced-additive-new-prefill-retained-state-proxy-v1":
+            return (
+                c["affinity_session_count"],
+                new_prefill + retained,
                 lane.live_sequence,
                 rotation,
             )
