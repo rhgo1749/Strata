@@ -69,7 +69,7 @@ Compare:
 - multiplicative new-prefill × load cost;
 - session-first balance + cache-aware continuation.
 
-Prefer the simplest policy that captures most of the gain.
+Prefer the simplest policy that captures most of the gain. Benchmark-only online challengers keep existing-session affinity and all health/capability/FIFO constraints intact; they may change only new-session placement among otherwise eligible idle lanes. Because an idle candidate has no active decode load under the current one-request-per-lane contract, retained-state heuristics must be named and reported as proxies rather than mislabeled as engine-truth least-loaded scheduling.
 
 ### 2B — Coupling-aware cost only if Phase 1 proves it is useful
 

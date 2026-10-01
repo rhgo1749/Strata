@@ -523,9 +523,25 @@ def lane_engine_alive(lane: Lane, timeout: float = 0.2) -> bool:
         return False
 
 
+SCHEDULER_POLICY_SAFE = "safe-affinity-live-state-v1"
+SCHEDULER_POLICIES = (
+    SCHEDULER_POLICY_SAFE,
+    "round-robin-idle-v1",
+    "retained-state-smallest-v1",
+    "cache-aware-idle-v1",
+    "additive-new-prefill-retained-state-proxy-v1",
+    "multiplicative-new-prefill-retained-state-proxy-v1",
+    "session-start-balance-cache-aware-v1",
+)
+
+
 class LanePool:
-    def __init__(self, lanes: list[Lane], *, max_affinity_entries: int | None = None):
+    def __init__(self, lanes: list[Lane], *, max_affinity_entries: int | None = None,
+                 scheduler_policy: str = SCHEDULER_POLICY_SAFE):
+        if scheduler_policy not in SCHEDULER_POLICIES:
+            raise ValueError(f"unknown scheduler policy: {scheduler_policy}")
         self.lanes = lanes
+        self.scheduler_policy = scheduler_policy
         self.cv = threading.Condition()
         self.cursor = 0
         self.vision_waiters = 0
@@ -602,6 +618,60 @@ class LanePool:
             return True
         return False
 
+    def _policy_components(self, lane: Lane, *,
+                           prompt_signature: tuple[tuple[str, int], ...],
+                           position: int) -> dict:
+        prompt_bytes = sum(size for _digest, size in prompt_signature)
+        reuse_bytes = reusable_prefix_bytes(prompt_signature, lane.live_prompt_signature)
+        return {
+            "estimated_reusable_prefix_bytes": reuse_bytes,
+            "estimated_new_prefill_bytes": max(0, prompt_bytes - reuse_bytes),
+            "retained_state_proxy_bytes": max(0, lane.live_request_bytes),
+            "rotation_offset": (position - self.cursor) % len(self.lanes),
+            "affinity_session_count": sum(
+                1 for lane_index in self.affinity.values() if lane_index == lane.index
+            ),
+        }
+
+    def _placement_score(self, lane: Lane, *,
+                         prompt_signature: tuple[tuple[str, int], ...],
+                         request_bytes: int,
+                         position: int) -> tuple:
+        c = self._policy_components(
+            lane,
+            prompt_signature=prompt_signature,
+            position=position,
+        )
+        reuse = c["estimated_reusable_prefix_bytes"]
+        new_prefill = c["estimated_new_prefill_bytes"]
+        retained = c["retained_state_proxy_bytes"]
+        rotation = c["rotation_offset"]
+
+        if self.scheduler_policy == SCHEDULER_POLICY_SAFE:
+            return (0 if retained == 0 else 1, retained, lane.live_sequence, rotation)
+        if self.scheduler_policy == "round-robin-idle-v1":
+            return (rotation,)
+        if self.scheduler_policy == "retained-state-smallest-v1":
+            return (retained, lane.live_sequence, rotation)
+        if self.scheduler_policy == "cache-aware-idle-v1":
+            if reuse:
+                return (0, -reuse, retained, lane.live_sequence, rotation)
+            return (1, 0 if retained == 0 else 1, retained, lane.live_sequence, rotation)
+        if self.scheduler_policy == "additive-new-prefill-retained-state-proxy-v1":
+            return (new_prefill + retained, lane.live_sequence, rotation)
+        if self.scheduler_policy == "multiplicative-new-prefill-retained-state-proxy-v1":
+            load_ratio = retained / max(1, request_bytes)
+            return (new_prefill * (1.0 + load_ratio), lane.live_sequence, rotation)
+        if self.scheduler_policy == "session-start-balance-cache-aware-v1":
+            return (
+                c["affinity_session_count"],
+                -reuse,
+                retained,
+                lane.live_sequence,
+                rotation,
+            )
+        raise AssertionError(f"unhandled scheduler policy: {self.scheduler_policy}")
+
     def _decision_record(self, *, alive: list[Lane], eligible: list[Lane], selected: Lane,
                          selected_reason: str, request_bytes: int,
                          prompt_signature: tuple[tuple[str, int], ...],
@@ -612,8 +682,13 @@ class LanePool:
         now_ns = time.monotonic_ns()
         lane_components = []
         for position, lane in enumerate(self.lanes):
-            reuse_bytes = reusable_prefix_bytes(prompt_signature, lane.live_prompt_signature)
-            rotation_offset = (position - self.cursor) % len(self.lanes)
+            policy_components = self._policy_components(
+                lane,
+                prompt_signature=prompt_signature,
+                position=position,
+            )
+            reuse_bytes = policy_components["estimated_reusable_prefix_bytes"]
+            rotation_offset = policy_components["rotation_offset"]
             queued_count, queued_bytes, oldest_queue_age_ms = self._compatible_waiter_stats(lane, now_ns)
             placement_key = [
                 0 if lane.live_request_bytes == 0 else 1,
@@ -621,6 +696,12 @@ class LanePool:
                 lane.live_sequence,
                 rotation_offset,
             ]
+            placement_score = list(self._placement_score(
+                lane,
+                prompt_signature=prompt_signature,
+                request_bytes=request_bytes,
+                position=position,
+            ))
             lane_components.append({
                 "lane_index": lane.index,
                 "alive": lane.index in alive_indices,
@@ -628,9 +709,6 @@ class LanePool:
                 "busy": lane.busy,
                 "vision": lane.vision,
                 "affinity_waiters": self.affinity_waiters.get(lane.index, 0),
-                "affinity_session_count": sum(
-                    1 for lane_index in self.affinity.values() if lane_index == lane.index
-                ),
                 "live_request_bytes": lane.live_request_bytes,
                 "retained_prompt_message_bytes": sum(
                     size for _digest, size in lane.live_prompt_signature
@@ -647,24 +725,26 @@ class LanePool:
                 "compatible_queued_request_count": queued_count,
                 "compatible_queued_request_bytes": queued_bytes,
                 "oldest_compatible_queue_age_ms": oldest_queue_age_ms,
-                "rotation_offset": rotation_offset,
-                "estimated_reusable_prefix_bytes": reuse_bytes,
-                "estimated_new_prefill_bytes": max(0, prompt_bytes - reuse_bytes),
+                **policy_components,
                 "placement_key": placement_key,
+                "placement_score": placement_score,
             })
         selected_component = next(x for x in lane_components if x["lane_index"] == selected.index)
         return {
-            "policy": "safe-affinity-live-state-v1",
+            "policy": self.scheduler_policy,
             "selected_reason": selected_reason,
             "session_turn": session_turn,
             "request_bytes": max(0, request_bytes),
             "prompt_message_bytes": prompt_bytes,
             "reuse_estimate_source": "routing_history_exact_message_prefix_bytes_v1",
+            "load_proxy_source": "retained_last_completed_request_bytes_v1",
+            "policy_scope": "new_session_idle_lane_only",
             "active_lane_count": sum(1 for lane in alive if lane.busy),
             "queued_request_count": len(self.waiters),
             "queued_request_bytes": sum(waiter.request_bytes for waiter in self.waiters.values()),
             "affinity_waiter_count": sum(self.affinity_waiters.values()),
             "selected_placement_key": selected_component["placement_key"],
+            "selected_placement_score": selected_component["placement_score"],
             "lane_components": lane_components,
         }
 
@@ -752,14 +832,13 @@ class LanePool:
                     if candidates:
                         idx, lane = min(
                             candidates,
-                            key=lambda pair: (
-                                0 if pair[1].live_request_bytes == 0 else 1,
-                                pair[1].live_request_bytes,
-                                pair[1].live_sequence,
+                            key=lambda pair: self._placement_score(
+                                pair[1],
+                                prompt_signature=prompt_signature,
+                                request_bytes=request_bytes,
+                                position=pair[0],
                             ),
                         )
-                        if affinity_key is not None:
-                            self._remember_affinity(affinity_key, lane.index)
                         self._drop_waiter(wait_ticket)
                         wait_ticket = None
                         session_turn = self._advance_session_turn(affinity_key)
@@ -768,11 +847,17 @@ class LanePool:
                                 alive=alive,
                                 eligible=eligible,
                                 selected=lane,
-                                selected_reason="live_state_lexicographic",
+                                selected_reason=(
+                                    "live_state_lexicographic"
+                                    if self.scheduler_policy == SCHEDULER_POLICY_SAFE
+                                    else "benchmark_policy_score"
+                                ),
                                 request_bytes=request_bytes,
                                 prompt_signature=prompt_signature,
                                 session_turn=session_turn,
                             ))
+                        if affinity_key is not None:
+                            self._remember_affinity(affinity_key, lane.index)
                         self._start_lane_work(
                             lane,
                             affinity_key=affinity_key,
@@ -976,6 +1061,7 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                 "queue": pool.queue_status(),
                 "bench_trace_jsonl": str(bench_trace.path) if bench_trace else None,
                 "bench_console_summary": bench_console_summary,
+                "scheduler_policy": pool.scheduler_policy,
                 "lanes": pool.status(),
             })
 
@@ -1269,8 +1355,19 @@ def main() -> int:
                     help="benchmark only: append exact lane lease timing records as JSONL")
     ap.add_argument("--bench-console-summary", action="store_true",
                     help="print concise per-request benchmark summaries to stdout without persistent trace storage")
+    ap.add_argument(
+        "--bench-scheduler-policy",
+        choices=SCHEDULER_POLICIES,
+        default=SCHEDULER_POLICY_SAFE,
+        help=(
+            "benchmark only: change new-session placement among eligible idle lanes; "
+            "non-default policies require --bench-trace-jsonl"
+        ),
+    )
     a = ap.parse_args()
 
+    if a.bench_scheduler_policy != SCHEDULER_POLICY_SAFE and not a.bench_trace_jsonl:
+        ap.error("non-default --bench-scheduler-policy requires --bench-trace-jsonl")
     if os.name == "nt":
         ap.error("the shared expert arena v1 is Linux-only")
     config = Path(a.config).expanduser().resolve()
@@ -1413,6 +1510,8 @@ def main() -> int:
             "arena_file": str(arena_file) if not a.private_arena else None,
             "arena_bytes": spec.bytes,
             "kv_budget": a.kv_budget,
+            "scheduler_policy": a.bench_scheduler_policy,
+            "scheduler_policy_scope": "new_session_idle_lane_only",
             "public_host": a.host,
             "public_port": a.port,
             "base_port": a.base_port,
@@ -1495,7 +1594,7 @@ def main() -> int:
             wait_ready(lane, a.startup_timeout)
             print(f"[strata-multigpu] lane {lane.index} ready", flush=True)
 
-        pool = LanePool(lanes)
+        pool = LanePool(lanes, scheduler_policy=a.bench_scheduler_policy)
         httpd = ThreadingHTTPServer(
             (a.host, a.port),
             make_handler(

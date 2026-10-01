@@ -673,6 +673,100 @@ class MultiGpuPlanningTests(unittest.TestCase):
         self.assertEqual(by_lane[1]["compatible_queued_request_bytes"], 6000)
         self.assertGreaterEqual(by_lane[1]["oldest_compatible_queue_age_ms"], 10.0)
 
+    def test_benchmark_scheduler_policies_choose_expected_idle_lane(self):
+        incoming = (("same-prefix", 100),)
+        expected = {
+            M.SCHEDULER_POLICY_SAFE: 2,
+            "round-robin-idle-v1": 0,
+            "retained-state-smallest-v1": 2,
+            "cache-aware-idle-v1": 0,
+            "additive-new-prefill-retained-state-proxy-v1": 2,
+            "multiplicative-new-prefill-retained-state-proxy-v1": 0,
+            "session-start-balance-cache-aware-v1": 1,
+        }
+
+        for policy, expected_lane in expected.items():
+            with self.subTest(policy=policy):
+                lanes = [
+                    M.Lane(
+                        0, "0", 19086, 262144, Path("lane0.json"),
+                        process=_AliveProcess(),
+                        live_request_bytes=9000,
+                        live_sequence=1,
+                        live_prompt_signature=incoming,
+                    ),
+                    M.Lane(
+                        1, "1", 19087, 262144, Path("lane1.json"),
+                        process=_AliveProcess(),
+                        live_request_bytes=1000,
+                        live_sequence=2,
+                    ),
+                    M.Lane(
+                        2, "2", 19088, 262144, Path("lane2.json"),
+                        process=_AliveProcess(),
+                    ),
+                ]
+                pool = M.LanePool(lanes, scheduler_policy=policy)
+                pool.affinity.update({"old-a": 0, "old-b": 0, "old-c": 2})
+                decision = {}
+                got = pool.acquire(
+                    affinity_key="new-session",
+                    request_bytes=500,
+                    prompt_signature=incoming,
+                    decision_out=decision,
+                )
+                self.assertEqual(got.index, expected_lane)
+                self.assertEqual(decision["policy"], policy)
+                self.assertEqual(decision["policy_scope"], "new_session_idle_lane_only")
+                self.assertEqual(
+                    decision["selected_reason"],
+                    "live_state_lexicographic"
+                    if policy == M.SCHEDULER_POLICY_SAFE
+                    else "benchmark_policy_score",
+                )
+                selected = next(
+                    row for row in decision["lane_components"]
+                    if row["lane_index"] == expected_lane
+                )
+                self.assertEqual(decision["selected_placement_score"], selected["placement_score"])
+                self.assertEqual(decision["selected_placement_key"], selected["placement_key"])
+                self.assertEqual(
+                    decision["load_proxy_source"],
+                    "retained_last_completed_request_bytes_v1",
+                )
+                if policy == M.SCHEDULER_POLICY_SAFE:
+                    self.assertEqual(selected["placement_score"], selected["placement_key"])
+                pool.release(
+                    got,
+                    affinity_key="new-session",
+                    request_bytes=500,
+                    prompt_signature=incoming,
+                )
+
+    def test_benchmark_policy_does_not_override_existing_session_affinity(self):
+        lanes = [
+            M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess()),
+            M.Lane(1, "1", 19087, 262144, Path("lane1.json"), process=_AliveProcess()),
+        ]
+        pool = M.LanePool(lanes, scheduler_policy="cache-aware-idle-v1")
+        pool.affinity["returning"] = 1
+        lanes[0].live_prompt_signature = (("perfect-match", 100),)
+        decision = {}
+        got = pool.acquire(
+            affinity_key="returning",
+            prompt_signature=(("perfect-match", 100),),
+            decision_out=decision,
+        )
+        self.assertEqual(got.index, 1)
+        self.assertEqual(decision["selected_reason"], "session_affinity")
+        self.assertEqual(decision["policy"], "cache-aware-idle-v1")
+        pool.release(got, affinity_key="returning")
+
+    def test_unknown_scheduler_policy_is_rejected(self):
+        lane = M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess())
+        with self.assertRaisesRegex(ValueError, "unknown scheduler policy"):
+            M.LanePool([lane], scheduler_policy="mystery")
+
     def test_unidentified_live_state_is_not_treated_as_empty(self):
         lanes = [
             M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess(),
