@@ -131,6 +131,8 @@ Prototype only if host expert misses/traffic remain a dominant steady-state cost
 
 Keep deferred while every lane can admit the required context and placement/wait/recompute remain sufficient. Reopen only when measured capacity/utilization or overload behavior justifies the ownership, migration, and recovery complexity.
 
+Research tracker: [#20 — cross-lane parked conversation migration](https://github.com/rhgo1749/Strata-Lanes/issues/20). Keep implementation parked while upstream Strata's conversation snapshot/cache/storage-tier interfaces are evolving; prefer consuming upstream state primitives over forking their snapshot format.
+
 ## Promotion gate
 
 A challenger must demonstrate all of the following on repeated runs:
