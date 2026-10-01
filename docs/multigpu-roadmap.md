@@ -6,7 +6,7 @@ Roadmap authority is GitHub Issue #1 and its child Issues. This document summari
 
 ## Current production baseline
 
-The current promoted engine generation is **Strata 0.1.30** in this fork.
+The current promoted engine generation is **Strata 0.1.31** in this fork, integrated from upstream `9259cad4cfa3543cd3b8decab5962672b968c649`.
 
 The architectural baseline is:
 
@@ -26,7 +26,7 @@ Prefer coarse-grained request/session parallelism while it wins on the workload 
 
 More sophisticated mechanisms are not automatically better. Cross-GPU expert routing, migration, dynamic shared KV, learned control, or single-process distributed execution add synchronization, coupling, and larger failure domains. Introduce them only after the simpler serving-control stages below leave a measured gap.
 
-## Phase 1 — Benchmark, observability, and interference characterization
+## Phase 1 — Benchmark, observability, and interference characterization (completed)
 
 Before changing policy, make the real decision variables observable.
 
@@ -53,9 +53,9 @@ Do not introduce a coupled cost model merely because resources are shared.
 
 **Exit condition:** the baseline can be replayed, routing decisions are auditable, and shared-resource interaction is either shown immaterial or characterized well enough to test as a scheduler signal.
 
-## Phase 2 — Stateful serving control while lanes remain independent
+## Phase 2 — Stateful serving control while lanes remain independent (completed)
 
-Phase 2 is evidence-gated and ordered.
+Phase 2 was evidence-gated and ordered. The promoted new-session placement policy is `balanced-additive-new-prefill-retained-state-proxy-v1`; the retained shared-pressure placement coefficient, bounded-admission default for the all-complete-immediately workload, and workload-regime adaptation were all evaluated and not promoted. `safe-affinity-live-state-v1` remains the rollback control.
 
 ### 2A — Strong simple placement baselines
 
@@ -174,12 +174,8 @@ Until measurements justify them, this roadmap does **not** assume that Strata sh
 
 ## Near-term order
 
-1. Finish Phase 1 observability and matched interference characterization.
-2. Run Phase 2A placement/locality comparisons.
-3. Add Phase 2B shared-pressure terms only if the evidence requires them.
-4. Add Phase 2C admission/tail control under overload.
-5. Add Phase 2D adaptation only if one fixed policy is not robust.
-6. Then improve startup/runtime lifecycle overhead.
-7. Run architecture challengers only when a measured trigger fires.
+1. Run Phase 3 startup/runtime lifecycle work on the promoted 0.1.31 baseline.
+2. Keep the completed Phase 1/2 benchmark, correctness, affinity, overload, and placement gates as regression controls.
+3. Run conditional architecture challengers only when a measured trigger fires; upstream peer/expert-tier work is an execution primitive to evaluate separately, not an automatic replacement for independent lanes.
 
 The default bias remains deliberate simplicity: add coupling only when measurements show it buys something.
