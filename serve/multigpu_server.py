@@ -524,6 +524,7 @@ def lane_engine_alive(lane: Lane, timeout: float = 0.2) -> bool:
 
 
 SCHEDULER_POLICY_SAFE = "safe-affinity-live-state-v1"
+SCHEDULER_POLICY_DEFAULT = "balanced-additive-new-prefill-retained-state-proxy-v1"
 SCHEDULER_POLICIES = (
     SCHEDULER_POLICY_SAFE,
     "round-robin-idle-v1",
@@ -532,13 +533,14 @@ SCHEDULER_POLICIES = (
     "additive-new-prefill-retained-state-proxy-v1",
     "multiplicative-new-prefill-retained-state-proxy-v1",
     "session-start-balance-cache-aware-v1",
-    "balanced-additive-new-prefill-retained-state-proxy-v1",
+    SCHEDULER_POLICY_DEFAULT,
 )
+SCHEDULER_POLICIES_WITHOUT_TRACE = frozenset({SCHEDULER_POLICY_SAFE, SCHEDULER_POLICY_DEFAULT})
 
 
 class LanePool:
     def __init__(self, lanes: list[Lane], *, max_affinity_entries: int | None = None,
-                 scheduler_policy: str = SCHEDULER_POLICY_SAFE):
+                 scheduler_policy: str = SCHEDULER_POLICY_DEFAULT):
         if scheduler_policy not in SCHEDULER_POLICIES:
             raise ValueError(f"unknown scheduler policy: {scheduler_policy}")
         self.lanes = lanes
@@ -858,7 +860,11 @@ class LanePool:
                                 selected_reason=(
                                     "live_state_lexicographic"
                                     if self.scheduler_policy == SCHEDULER_POLICY_SAFE
-                                    else "benchmark_policy_score"
+                                    else (
+                                        "session_start_balance_additive"
+                                        if self.scheduler_policy == SCHEDULER_POLICY_DEFAULT
+                                        else "benchmark_policy_score"
+                                    )
                                 ),
                                 request_bytes=request_bytes,
                                 prompt_signature=prompt_signature,
@@ -1366,16 +1372,17 @@ def main() -> int:
     ap.add_argument(
         "--bench-scheduler-policy",
         choices=SCHEDULER_POLICIES,
-        default=SCHEDULER_POLICY_SAFE,
+        default=SCHEDULER_POLICY_DEFAULT,
         help=(
-            "benchmark only: change new-session placement among eligible idle lanes; "
-            "non-default policies require --bench-trace-jsonl"
+            "select new-session placement among eligible idle lanes; "
+            "the promoted balanced-additive default and safe rollback may run without trace, "
+            "experimental policies require --bench-trace-jsonl"
         ),
     )
     a = ap.parse_args()
 
-    if a.bench_scheduler_policy != SCHEDULER_POLICY_SAFE and not a.bench_trace_jsonl:
-        ap.error("non-default --bench-scheduler-policy requires --bench-trace-jsonl")
+    if a.bench_scheduler_policy not in SCHEDULER_POLICIES_WITHOUT_TRACE and not a.bench_trace_jsonl:
+        ap.error("experimental --bench-scheduler-policy requires --bench-trace-jsonl")
     if os.name == "nt":
         ap.error("the shared expert arena v1 is Linux-only")
     config = Path(a.config).expanduser().resolve()

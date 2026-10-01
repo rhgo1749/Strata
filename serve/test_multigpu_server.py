@@ -245,8 +245,8 @@ class MultiGpuPlanningTests(unittest.TestCase):
             self.assertEqual(rec["reusable_prefix_tokens"], 0)
             self.assertEqual(rec["new_prefill_tokens"], 11)
             self.assertEqual(rec["output_target_tokens"], 8)
-            self.assertEqual(rec["scheduler"]["policy"], "safe-affinity-live-state-v1")
-            self.assertEqual(rec["scheduler"]["selected_reason"], "live_state_lexicographic")
+            self.assertEqual(rec["scheduler"]["policy"], M.SCHEDULER_POLICY_DEFAULT)
+            self.assertEqual(rec["scheduler"]["selected_reason"], "session_start_balance_additive")
             self.assertEqual(rec["scheduler"]["session_turn"], 1)
             self.assertEqual(rec["scheduler"]["queued_request_count"], 0)
             self.assertEqual(rec["scheduler"]["lane_components"][0]["lane_index"], 0)
@@ -721,9 +721,15 @@ class MultiGpuPlanningTests(unittest.TestCase):
                 self.assertEqual(decision["policy_scope"], "new_session_idle_lane_only")
                 self.assertEqual(
                     decision["selected_reason"],
-                    "live_state_lexicographic"
-                    if policy == M.SCHEDULER_POLICY_SAFE
-                    else "benchmark_policy_score",
+                    (
+                        "live_state_lexicographic"
+                        if policy == M.SCHEDULER_POLICY_SAFE
+                        else (
+                            "session_start_balance_additive"
+                            if policy == M.SCHEDULER_POLICY_DEFAULT
+                            else "benchmark_policy_score"
+                        )
+                    ),
                 )
                 selected = next(
                     row for row in decision["lane_components"]
