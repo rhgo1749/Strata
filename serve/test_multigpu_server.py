@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import sys
 import tempfile
@@ -252,6 +254,66 @@ class MultiGpuPlanningTests(unittest.TestCase):
             self.assertGreater(
                 records[1]["scheduler"]["lane_components"][0]["estimated_reusable_prefix_bytes"], 0
             )
+
+    def test_console_summary_can_run_without_jsonl_trace(self):
+        class Backend(M.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, fmt, *args):
+                pass
+
+            def do_POST(self):
+                n = int(self.headers.get("Content-Length", "0") or 0)
+                if n:
+                    self.rfile.read(n)
+                body = b'{"ok":true}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        backend = M.ThreadingHTTPServer(("127.0.0.1", 0), Backend)
+        backend_thread = threading.Thread(target=backend.serve_forever, daemon=True)
+        backend_thread.start()
+        lane = M.Lane(0, "0", backend.server_address[1], 32768, Path("lane.json"), process=_AliveProcess())
+        pool = M.LanePool([lane])
+        handler = M.make_handler(
+            pool,
+            lane,
+            Path("/dev/shm/fake.bin"),
+            123,
+            None,
+            bench_console_summary=True,
+        )
+        proxy = M.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        proxy_thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+        proxy_thread.start()
+        output = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(output):
+                conn = M.http.client.HTTPConnection("127.0.0.1", proxy.server_address[1], timeout=2)
+                body = b'{"stream":true,"messages":[{"role":"user","content":"hi"}]}'
+                conn.request(
+                    "POST",
+                    "/v1/chat/completions",
+                    body=body,
+                    headers={"Content-Type": "application/json", "Content-Length": str(len(body))},
+                )
+                resp = conn.getresponse()
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(resp.read(), b'{"ok":true}')
+                conn.close()
+        finally:
+            proxy.shutdown()
+            proxy.server_close()
+            backend.shutdown()
+            backend.server_close()
+            proxy_thread.join(1.0)
+            backend_thread.join(1.0)
+        rendered = output.getvalue()
+        self.assertIn("[strata-multigpu][bench]", rendered)
+        self.assertIn("lane=0", rendered)
 
     def test_benchmark_console_summary_is_concise_and_privacy_safe(self):
         record = {
