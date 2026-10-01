@@ -600,6 +600,164 @@ class MultiGpuPlanningTests(unittest.TestCase):
         self.assertEqual(acquired[0].index, 0)
         pool.release(acquired[0], affinity_key="queued", request_bytes=4321)
 
+    def test_active_work_is_separate_from_retained_lane_state(self):
+        lane = M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess())
+        pool = M.LanePool([lane])
+        signature = (("prompt-a", 123), ("prompt-b", 77))
+
+        got = pool.acquire(
+            affinity_key="session-a",
+            request_bytes=4567,
+            prompt_signature=signature,
+        )
+        self.assertIs(got, lane)
+        self.assertTrue(lane.busy)
+        self.assertEqual(lane.active_affinity_key, "session-a")
+        self.assertEqual(lane.active_request_bytes, 4567)
+        self.assertEqual(lane.active_prompt_signature, signature)
+        self.assertIsNotNone(lane.active_started_mono_ns)
+        self.assertEqual(lane.live_request_bytes, 0)
+        self.assertEqual(lane.live_prompt_signature, ())
+
+        pool.release(
+            lane,
+            affinity_key="session-a",
+            request_bytes=4567,
+            prompt_signature=signature,
+        )
+        self.assertFalse(lane.busy)
+        self.assertIsNone(lane.active_affinity_key)
+        self.assertEqual(lane.active_request_bytes, 0)
+        self.assertEqual(lane.active_prompt_signature, ())
+        self.assertIsNone(lane.active_started_mono_ns)
+        self.assertEqual(lane.live_request_bytes, 4567)
+        self.assertEqual(lane.live_prompt_signature, signature)
+
+    def test_decision_record_exposes_phase2_queue_and_active_proxies(self):
+        lanes = [
+            M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess()),
+            M.Lane(1, "1", 19087, 262144, Path("lane1.json"), vision=True, process=_AliveProcess()),
+        ]
+        pool = M.LanePool(lanes)
+        pool.affinity.update({"a": 0, "b": 0, "c": 1})
+        now = time.monotonic_ns()
+        pool.waiters[10] = M.Waiter(False, 4000, now - 5_000_000)
+        pool.waiters[11] = M.Waiter(True, 2000, now - 10_000_000)
+        pool._start_lane_work(
+            lanes[0],
+            affinity_key="active-a",
+            request_bytes=1234,
+            prompt_signature=(("active", 50),),
+        )
+
+        record = pool._decision_record(
+            alive=lanes,
+            eligible=lanes,
+            selected=lanes[1],
+            selected_reason="test",
+            request_bytes=999,
+            prompt_signature=(("incoming", 60),),
+            session_turn=1,
+        )
+        by_lane = {row["lane_index"]: row for row in record["lane_components"]}
+
+        self.assertEqual(by_lane[0]["affinity_session_count"], 2)
+        self.assertEqual(by_lane[1]["affinity_session_count"], 1)
+        self.assertEqual(by_lane[0]["active_request_bytes"], 1234)
+        self.assertEqual(by_lane[0]["active_prompt_message_bytes"], 50)
+        self.assertIsNotNone(by_lane[0]["active_elapsed_ms"])
+        self.assertEqual(by_lane[0]["compatible_queued_request_count"], 1)
+        self.assertEqual(by_lane[0]["compatible_queued_request_bytes"], 4000)
+        self.assertGreaterEqual(by_lane[0]["oldest_compatible_queue_age_ms"], 5.0)
+        self.assertEqual(by_lane[1]["compatible_queued_request_count"], 2)
+        self.assertEqual(by_lane[1]["compatible_queued_request_bytes"], 6000)
+        self.assertGreaterEqual(by_lane[1]["oldest_compatible_queue_age_ms"], 10.0)
+
+    def test_benchmark_scheduler_policies_choose_expected_idle_lane(self):
+        incoming = (("same-prefix", 100),)
+        expected = {
+            M.SCHEDULER_POLICY_SAFE: 2,
+            "round-robin-idle-v1": 0,
+            "least-loaded-v1": 2,
+            "cache-aware-fallback-v1": 0,
+            "additive-new-prefill-load-v1": 2,
+            "multiplicative-new-prefill-load-v1": 0,
+            "session-first-cache-aware-v1": 1,
+        }
+
+        for policy, expected_lane in expected.items():
+            with self.subTest(policy=policy):
+                lanes = [
+                    M.Lane(
+                        0, "0", 19086, 262144, Path("lane0.json"),
+                        process=_AliveProcess(),
+                        live_request_bytes=9000,
+                        live_sequence=1,
+                        live_prompt_signature=incoming,
+                    ),
+                    M.Lane(
+                        1, "1", 19087, 262144, Path("lane1.json"),
+                        process=_AliveProcess(),
+                        live_request_bytes=1000,
+                        live_sequence=2,
+                    ),
+                    M.Lane(
+                        2, "2", 19088, 262144, Path("lane2.json"),
+                        process=_AliveProcess(),
+                    ),
+                ]
+                pool = M.LanePool(lanes, scheduler_policy=policy)
+                pool.affinity.update({"old-a": 0, "old-b": 0, "old-c": 2})
+                decision = {}
+                got = pool.acquire(
+                    affinity_key="new-session",
+                    request_bytes=500,
+                    prompt_signature=incoming,
+                    decision_out=decision,
+                )
+                self.assertEqual(got.index, expected_lane)
+                self.assertEqual(decision["policy"], policy)
+                self.assertEqual(
+                    decision["selected_reason"],
+                    "live_state_lexicographic"
+                    if policy == M.SCHEDULER_POLICY_SAFE
+                    else "benchmark_policy_score",
+                )
+                self.assertEqual(
+                    decision["selected_placement_score"],
+                    next(
+                        row["placement_score"]
+                        for row in decision["lane_components"]
+                        if row["lane_index"] == expected_lane
+                    ),
+                )
+                self.assertEqual(decision["load_proxy_source"], "last_completed_request_bytes_v1")
+                pool.release(got, affinity_key="new-session", request_bytes=500, prompt_signature=incoming)
+
+    def test_scheduler_policy_does_not_override_existing_session_affinity(self):
+        lanes = [
+            M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess()),
+            M.Lane(1, "1", 19087, 262144, Path("lane1.json"), process=_AliveProcess()),
+        ]
+        pool = M.LanePool(lanes, scheduler_policy="cache-aware-fallback-v1")
+        pool.affinity["returning"] = 1
+        lanes[0].live_prompt_signature = (("perfect-match", 100),)
+        decision = {}
+        got = pool.acquire(
+            affinity_key="returning",
+            prompt_signature=(("perfect-match", 100),),
+            decision_out=decision,
+        )
+        self.assertEqual(got.index, 1)
+        self.assertEqual(decision["selected_reason"], "session_affinity")
+        self.assertEqual(decision["policy"], "cache-aware-fallback-v1")
+        pool.release(got, affinity_key="returning")
+
+    def test_unknown_scheduler_policy_is_rejected(self):
+        lane = M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess())
+        with self.assertRaisesRegex(ValueError, "unknown scheduler policy"):
+            M.LanePool([lane], scheduler_policy="mystery")
+
     def test_unidentified_live_state_is_not_treated_as_empty(self):
         lanes = [
             M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess(),
