@@ -98,6 +98,13 @@ def sanitize_lane_config(cfg: dict) -> dict:
     return lane_cfg
 
 
+def bind_lane_gpu(lane_cfg: dict, gpu: str) -> dict:
+    """Bind a sanitized lane config to one physical GPU for engine launch and telemetry."""
+    lane_cfg = copy.deepcopy(lane_cfg)
+    lane_cfg["gpu"] = int(gpu)
+    return lane_cfg
+
+
 def apply_vision_capability(lane_cfg: dict, enabled: bool) -> dict:
     """Strip encoder config and its reserved VRAM from lanes that are not vision-capable."""
     if enabled or not lane_cfg.get("vision"):
@@ -1290,7 +1297,7 @@ def main() -> int:
 
     lanes: list[Lane] = []
     for i, (gpu, ctx) in enumerate(zip(gpus, contexts)):
-        lane_cfg = sanitize_lane_config(cfg)
+        lane_cfg = bind_lane_gpu(sanitize_lane_config(cfg), gpu)
         lane_vision = i in vision_lanes
         lane_cfg = apply_vision_capability(lane_cfg, lane_vision)
         lane_cfg = apply_shared_arena(lane_cfg, None if a.private_arena else arena_file)

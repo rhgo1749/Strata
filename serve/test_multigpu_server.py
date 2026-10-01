@@ -64,6 +64,14 @@ class MultiGpuPlanningTests(unittest.TestCase):
         self.assertIn("gpu", cfg)
         self.assertIn("--layer-split", cfg["args"])
 
+    def test_bound_lane_config_uses_single_physical_gpu_for_telemetry(self):
+        cfg = {"gpu": [0, 1, 2], "layer_split": "16,32",
+               "args": ["--pack", "/m", "--layer-split", "auto"]}
+        got = M.bind_lane_gpu(M.sanitize_lane_config(cfg), "2")
+        self.assertEqual(got["gpu"], 2)
+        self.assertNotIn("layer_split", got)
+        self.assertNotIn("--layer-split", got["args"])
+
     def test_lane_config_disables_upstream_conversation_parking(self):
         cfg = {"args": ["--pack", "/m", "--conversation-cache-mib", "8192",
                          "--conversation-cache-slots", "4"]}
@@ -303,6 +311,9 @@ class MultiGpuPlanningTests(unittest.TestCase):
                 resp = conn.getresponse()
                 self.assertEqual(resp.status, 200)
                 self.assertEqual(resp.read(), b'{"ok":true}')
+                deadline = time.monotonic() + 1.0
+                while "[strata-multigpu][bench]" not in output.getvalue() and time.monotonic() < deadline:
+                    time.sleep(0.005)
                 conn.close()
         finally:
             proxy.shutdown()
