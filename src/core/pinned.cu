@@ -40,6 +40,7 @@ namespace {
 
 constexpr uint64_t kSharedArenaHeaderBytes = 4096;
 constexpr char kSharedArenaMagic[16] = "STRATA-ARENA-V1";
+constexpr uint64_t kSharedArenaPopulationReady = 1;
 
 struct SharedArenaHeader {
     char magic[16];
@@ -298,6 +299,7 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds,
                          uint64_t shared_pack_hash) : capacity(bytes) {
     if (bytes == 0) return;
     base = reserve(bytes, backing, note, shared_file, shared_pack_hash, mapping_base, mapping_bytes);
+    shared_mapping = !shared_file.empty() && base != nullptr && mapping_base != nullptr;
     if (base != nullptr && mapping_base == nullptr) {
         mapping_base = base;
         mapping_bytes = bytes;
@@ -389,6 +391,38 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds,
             }
         }
     }
+}
+
+bool PinnedArena::shared_population_ready() const {
+#ifdef _WIN32
+    return false;
+#else
+    if (!shared_mapping || mapping_base == nullptr) return false;
+    auto* hdr = static_cast<SharedArenaHeader*>(mapping_base);
+    return __atomic_load_n(&hdr->reserved[0], __ATOMIC_ACQUIRE) == kSharedArenaPopulationReady;
+#endif
+}
+
+bool PinnedArena::begin_shared_population() {
+#ifdef _WIN32
+    return false;
+#else
+    if (!shared_mapping || mapping_base == nullptr) return false;
+    auto* hdr = static_cast<SharedArenaHeader*>(mapping_base);
+    __atomic_store_n(&hdr->reserved[0], 0, __ATOMIC_RELEASE);
+    return true;
+#endif
+}
+
+bool PinnedArena::publish_shared_population() {
+#ifdef _WIN32
+    return false;
+#else
+    if (!shared_mapping || mapping_base == nullptr) return false;
+    auto* hdr = static_cast<SharedArenaHeader*>(mapping_base);
+    __atomic_store_n(&hdr->reserved[0], kSharedArenaPopulationReady, __ATOMIC_RELEASE);
+    return true;
+#endif
 }
 
 PinnedArena::~PinnedArena() {

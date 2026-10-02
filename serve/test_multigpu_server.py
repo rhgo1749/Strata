@@ -109,18 +109,42 @@ class MultiGpuPlanningTests(unittest.TestCase):
         got = M.apply_shared_arena(cfg, Path("/dev/shm/strata/new.bin"))
         self.assertEqual(M.option_value(got["args"], "--shared-expert-arena"), "/dev/shm/strata/new.bin")
         self.assertEqual(got["args"].count("--shared-expert-arena"), 1)
+        self.assertNotIn("--shared-expert-arena-follower", got["args"])
         self.assertEqual(M.option_value(cfg["args"], "--shared-expert-arena"), "/old")
 
+    def test_shared_arena_follower_is_explicit_and_replaces_stale_flag(self):
+        cfg = {"args": ["--pack", "/m", "--shared-expert-arena", "/old",
+                        "--shared-expert-arena-follower"]}
+        leader = M.apply_shared_arena(cfg, Path("/dev/shm/strata/new.bin"))
+        follower = M.apply_shared_arena(cfg, Path("/dev/shm/strata/new.bin"), follower=True)
+        self.assertNotIn("--shared-expert-arena-follower", leader["args"])
+        self.assertEqual(follower["args"].count("--shared-expert-arena-follower"), 1)
+
     def test_private_arena_strips_inherited_shared_arena(self):
-        cfg = {"args": ["--pack", "/m", "--shared-expert-arena", "/old", "--kv", "int8"]}
+        cfg = {"args": ["--pack", "/m", "--shared-expert-arena", "/old",
+                        "--shared-expert-arena-follower", "--kv", "int8"]}
         got = M.apply_shared_arena(cfg, None)
         self.assertNotIn("--shared-expert-arena", got["args"])
+        self.assertNotIn("--shared-expert-arena-follower", got["args"])
         self.assertEqual(got["args"], ["--pack", "/m", "--kv", "int8"])
 
     def test_default_shared_arena_is_tmpfs(self):
         spec = M.ArenaSpec(bytes=100, expert_bytes=80, max_blob=20, n_expert=512)
         path = M.default_arena_file(Path("/models/pack"), spec)
         self.assertEqual(path.parts[:3], ("/", "dev", "shm"))
+
+    @unittest.skipIf(M.fcntl is None, "flock is Linux-only")
+    def test_shared_arena_lease_refuses_a_second_supervisor(self):
+        with tempfile.TemporaryDirectory() as td:
+            arena = Path(td) / "arena.bin"
+            first = M.SharedArenaLease(arena)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "already owned"):
+                    M.SharedArenaLease(arena)
+            finally:
+                first.close()
+            second = M.SharedArenaLease(arena)
+            second.close()
 
     def test_port_preflight_rejects_stale_listener(self):
         sock = M.socket.socket(M.socket.AF_INET, M.socket.SOCK_STREAM)

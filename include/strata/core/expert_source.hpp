@@ -603,7 +603,8 @@ public:
     /// Allocates and loads `<pack_dir>/experts.bin`.  Prints nothing; the caller reports `note()` and the load
     /// rate, because those are the two numbers that say whether the arena is the one that was asked for.
     bool open(const std::string& pack_dir, int64_t n_layers, int64_t n_expert, int threads, std::string& err,
-              uint64_t max_pinned_bytes = 0, const std::string& shared_arena_file = {});
+              uint64_t max_pinned_bytes = 0, const std::string& shared_arena_file = {},
+              bool shared_arena_follower = false);
     /// Plan v0.3 P6: a native pack without experts.bin takes its experts from the model's GGUF: `native` is the
     /// --native shard, and native_experts.txt names the other shards beside it (per layer, or per role in v4).
     void set_gguf(const std::string& native) { gguf_ = native; }
@@ -626,6 +627,7 @@ public:
     double load_seconds() const { return load_seconds_; }
     double load_read_seconds() const { return load_read_s_; }
     double load_copy_seconds() const { return load_copy_s_; }
+    bool reused_shared_population() const { return reused_shared_population_; }
 
 private:
     void* arena_ = nullptr;          ///< the PinnedArena, owned
@@ -641,6 +643,7 @@ private:
     double load_read_s_ = 0.0;
     double load_copy_s_ = 0.0;
     uint64_t pinned_bytes_ = 0;
+    bool reused_shared_population_ = false;
     std::string gguf_;
 };
 

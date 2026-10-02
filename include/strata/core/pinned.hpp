@@ -54,12 +54,20 @@ struct PinnedArena {
     std::vector<uint64_t> slice_starts;
     void* mapping_base = nullptr;     ///< actual mapping start; differs from base when a shared-file header exists
     uint64_t mapping_bytes = 0;       ///< bytes to release from mapping_base
+    bool shared_mapping = false;       ///< true only for the Linux MAP_SHARED file-backed form
     ~PinnedArena();
     PinnedArena(const PinnedArena&) = delete;
     PinnedArena& operator=(const PinnedArena&) = delete;
 
     bool valid() const { return base != nullptr; }
     uint8_t* data() const { return (uint8_t*) base; }
+
+    /// Phase 3 lifecycle handoff for a shared-file arena.  A leader clears readiness before populating and
+    /// publishes it only after the complete expert source has been loaded.  Followers may skip their source
+    /// load only after observing the published state.  Anonymous/Windows arenas always return false/no-op.
+    bool shared_population_ready() const;
+    bool begin_shared_population();
+    bool publish_shared_population();
 };
 
 struct LoadStats {

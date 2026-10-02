@@ -19,9 +19,9 @@ Detailed reference-host hardware, tuning values, benchmark tables, and validatio
 
 Strata 0.1.31 retains the file-backed arena primitive introduced upstream in 0.1.30 through `--shared-expert-arena FILE` (originating from this fork's upstream PR #129). On Linux, upstream `PinnedArena` maps one shared file with a 4 KiB header containing the arena geometry and pack fingerprint; incompatible size or pack identity is refused before the arena is used. The ordinary anonymous/hugetlb path remains unchanged when the option is absent. The 0.1.31 pinning changes keep whole-arena pinning as the Linux default; the WDDM shared-memory cap is Windows-specific unless explicitly overridden with `STRATA_ARENA_PIN_GIB`.
 
-The lane supervisor now composes that upstream primitive rather than intercepting `mmap`: it strips any inherited shared-arena option, adds the same explicit `--shared-expert-arena` path to every shared lane, and removes the option entirely for the private-arena benchmark arm. The default backing lives under `/dev/shm`, matching upstream's tmpfs contract; an explicit `--arena-file` can select another operator-managed tmpfs path.
+The lane supervisor composes that upstream primitive rather than intercepting `mmap`: it strips inherited shared-arena options, adds the same explicit `--shared-expert-arena` path to every shared lane, and removes the option entirely for the private-arena benchmark arm. The default backing lives under `/dev/shm`, matching upstream's tmpfs contract; an explicit `--arena-file` selects an operator-managed path. Automatically chosen backing files are removed on graceful supervisor exit, while explicit backing-file lifetime remains operator-owned.
 
-Lane startup is currently sequential because each ordinary engine initialization still populates the mapped arena. A future leader/follower initialization mechanism can remove that repeated source load without changing the steady-state sharing model.
+Phase 3 adds a leader/follower population contract without changing the steady-state inference model. Sequential startup makes lane 0 the authoritative population leader. Before copying experts it publishes the shared header as incomplete; only after the full expert source load succeeds does it publish readiness with release semantics. Later lanes start with `--shared-expert-arena-follower`, verify the existing size/pack identity and readiness state, and then skip the repeated source expert load. A follower refuses an incomplete arena rather than observing partially populated weights. The supervisor also holds a non-blocking ownership lock for the arena pathname for its lifetime, so a second supervisor cannot repopulate the same backing concurrently. A new leader intentionally repopulates an existing compatible backing rather than trusting stale bytes as persistent cache state.
 
 ## Lane-local state
 
@@ -82,7 +82,7 @@ The shared-lane runtime is based on upstream Strata **0.1.31**, integrated at fo
 
 The 0.1.31 compatibility pass keeps upstream's resident/file-tier additions, native quant support, server/tokenizer/tool-call fixes, sampler/MTP changes, multi-GPU layer split, and native shared-arena implementation while retaining the fork's adaptive tracing, supervisor, exact benchmark lease tracing, and session-aware lane scheduler. The low-RAM GGUF/RAM/SSD tier is not enabled by the shared-arena production path. The supervisor strips inherited `gpu` / `layer_split` settings so a lane cannot accidentally re-expand into a coupled layer split.
 
-The shared-arena implementation is no longer a fork-owned mmap wrapper: the supervisor passes upstream's native `--shared-expert-arena` option to each lane. It explicitly forces `--conversation-cache-mib 0` until parked-conversation locality is modeled, and it preflights public/private ports before expensive model loading so stale listeners cannot satisfy readiness for a new lane.
+The shared-arena implementation is no longer a fork-owned mmap wrapper: the supervisor passes upstream's native `--shared-expert-arena` option to each lane and adds the follower flag only to later sequential lanes. It explicitly forces `--conversation-cache-mib 0` until parked-conversation locality is modeled, preflights public/private ports before expensive model loading so stale listeners cannot satisfy readiness for a new lane, and owns a supervisor-level arena lock so concurrent population of one backing fails closed.
 
 The 0.1.31 promotion parity campaign passed the full Python serving suite (156 tests, 7 skipped), the sm_120 CUDA 13.4 build, and 47 of 52 registered CTests. Two IQ fixture tests skipped because their generated fixture was unavailable; the three remaining failures (`ple_parity`, `expert_parity`, `pool_test`) require external model/pack fixtures and match the known fixture boundary rather than a runtime regression. A live 3-lane smoke passed text, vision-on-lane-1, two-turn affinity with 56 cached tokens, malformed-input 400 handling, streaming client-disconnect cleanup, and immediate recovery.
 
@@ -100,7 +100,7 @@ Current boundaries:
 
 1. Shared-arena mode is Linux-only.
 2. Host-KV capacity is statically configured per lane.
-3. Source expert loading is still repeated during sequential lane startup.
+3. Shared-arena startup uses one source expert population per supervisor generation; later lanes still perform their own dense/model-local initialization and GPU cache fill.
 4. Hot-expert caches are lane-local; there is no required cross-GPU ownership scheme.
 5. The supervisor is focused on generation serving and may route other endpoints through one lane.
 6. Session affinity is only as strong as the available identity. Explicit session/conversation/thread IDs are authoritative; the first-user-message fallback is best effort and can change if a client rewrites or compacts away the first user turn.

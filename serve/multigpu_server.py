@@ -20,6 +20,10 @@ import hashlib
 import http.client
 import json
 import os
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - shared-arena multi-process mode is Linux-only
+    fcntl = None
 import re
 import signal
 import socket
@@ -116,12 +120,15 @@ def apply_vision_capability(lane_cfg: dict, enabled: bool) -> dict:
     return lane_cfg
 
 
-def apply_shared_arena(lane_cfg: dict, arena_file: Path | None) -> dict:
-    """Use upstream 0.1.30's explicit shared-arena CLI and never inherit a stale backing."""
+def apply_shared_arena(lane_cfg: dict, arena_file: Path | None, *, follower: bool = False) -> dict:
+    """Use the explicit shared arena and mark only later sequential lanes as safe followers."""
     lane_cfg = copy.deepcopy(lane_cfg)
     args = remove_option(list(lane_cfg.get("args") or []), "--shared-expert-arena")
+    args = remove_flag(args, "--shared-expert-arena-follower")
     if arena_file is not None:
         args += ["--shared-expert-arena", str(arena_file)]
+        if follower:
+            args += ["--shared-expert-arena-follower"]
     lane_cfg["args"] = args
     return lane_cfg
 
@@ -422,6 +429,31 @@ def default_state_dir(config: Path, gpus: list[str]) -> Path:
     ).hexdigest()[:16]
     base = Path(os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache"))
     return base / "strata" / "multigpu" / key
+
+
+class SharedArenaLease:
+    """Hold one supervisor-level ownership lock for a shared-arena pathname."""
+
+    def __init__(self, arena_file: Path):
+        if fcntl is None:
+            raise RuntimeError("shared-arena supervisor ownership requires Linux fcntl/flock")
+        self.path = Path(str(arena_file) + ".lock")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.file = self.path.open("a+b")
+        try:
+            fcntl.flock(self.file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            self.file.close()
+            raise RuntimeError(f"shared arena is already owned by another supervisor: {arena_file}") from e
+
+    def close(self) -> None:
+        if self.file is None:
+            return
+        try:
+            fcntl.flock(self.file.fileno(), fcntl.LOCK_UN)
+        finally:
+            self.file.close()
+            self.file = None
 
 
 def default_arena_file(pack: Path, spec: ArenaSpec) -> Path:
@@ -1424,8 +1456,15 @@ def main() -> int:
 
     state_dir = Path(a.state_dir).expanduser().resolve() if a.state_dir else default_state_dir(config, gpus)
     state_dir.mkdir(parents=True, exist_ok=True)
-    arena_file = Path(a.arena_file).expanduser().resolve() if a.arena_file else default_arena_file(pack, spec)
+    arena_file_explicit = bool(a.arena_file)
+    arena_file = Path(a.arena_file).expanduser().resolve() if arena_file_explicit else default_arena_file(pack, spec)
     arena_file.parent.mkdir(parents=True, exist_ok=True)
+    arena_lease = None
+    if not a.private_arena:
+        try:
+            arena_lease = SharedArenaLease(arena_file)
+        except RuntimeError as e:
+            ap.error(str(e))
     bench_trace = BenchmarkTrace(Path(a.bench_trace_jsonl).expanduser().resolve()) if a.bench_trace_jsonl else None
 
     try:
@@ -1484,7 +1523,11 @@ def main() -> int:
         lane_cfg = bind_lane_gpu(sanitize_lane_config(cfg), gpu)
         lane_vision = i in vision_lanes
         lane_cfg = apply_vision_capability(lane_cfg, lane_vision)
-        lane_cfg = apply_shared_arena(lane_cfg, None if a.private_arena else arena_file)
+        lane_cfg = apply_shared_arena(
+            lane_cfg,
+            None if a.private_arena else arena_file,
+            follower=(not a.private_arena and i > 0),
+        )
         lane_cfg["args"] = replace_option(lane_cfg["args"], "--max-context", ctx)
         if pcie_fracs[i] is not None:
             lane_cfg["args"] = replace_option(lane_cfg["args"], "--pcie-frac", pcie_fracs[i])
@@ -1637,6 +1680,14 @@ def main() -> int:
     finally:
         for lane in reversed(started):
             stop_lane(lane)
+        if arena_lease is not None:
+            arena_lease.close()
+        if not a.private_arena and not arena_file_explicit:
+            try:
+                arena_file.unlink(missing_ok=True)
+                Path(str(arena_file) + ".lock").unlink(missing_ok=True)
+            except OSError as e:
+                print(f"[strata-multigpu] warning: could not remove managed shared arena: {e}", file=sys.stderr)
     return 0
 
 

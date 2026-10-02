@@ -2171,8 +2171,9 @@ ArenaExpertSource::~ArenaExpertSource() { close(); }
 
 bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int64_t n_expert, int threads,
                              std::string& err, uint64_t max_pinned_bytes,
-                             const std::string& shared_arena_file) {
+                             const std::string& shared_arena_file, bool shared_arena_follower) {
     close();
+    reused_shared_population_ = false;
     const std::string path = pack_dir + "/experts.bin";
     // plan v0.3 P6: the layout (canonical, or a native pack's per-layer blobs) was loaded by the driver
     const strata::kernels::cpu::ExpertLayout& lay = strata::kernels::cpu::expert_layout();
@@ -2231,17 +2232,40 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
               (why.empty() ? std::string{} : ": " + why);
         return false;
     }
-    const LoadStats st = from_gguf ? load_experts_gguf(gguf_, a->data(), lay, threads)
-                                   : load_experts_ranges(path, a->data(), loff, lbytes, threads, /*chunk=*/8u << 20);
-    if (!st.ok) {
-        delete a;
-        err = "ArenaExpertSource: the expert load was refused: " + (st.error.empty() ? std::string("unknown") : st.error);
-        return false;
-    }
-    if (st.bytes != want) {
-        delete a;
-        err = "ArenaExpertSource: the load read " + std::to_string(st.bytes) + " B of " + std::to_string(want);
-        return false;
+    LoadStats st;
+    if (shared_arena_follower) {
+        if (shared_arena_file.empty() || !a->shared_population_ready()) {
+            delete a;
+            err = "ArenaExpertSource: shared-arena follower refused an arena whose population is not ready";
+            return false;
+        }
+        st.bytes = want;
+        st.layers = (uint64_t) n_layers;
+        reused_shared_population_ = true;
+    } else {
+        if (!shared_arena_file.empty() && !a->begin_shared_population()) {
+            delete a;
+            err = "ArenaExpertSource: could not mark the shared arena population incomplete";
+            return false;
+        }
+        st = from_gguf ? load_experts_gguf(gguf_, a->data(), lay, threads)
+                       : load_experts_ranges(path, a->data(), loff, lbytes, threads, /*chunk=*/8u << 20);
+        if (!st.ok) {
+            delete a;
+            err = "ArenaExpertSource: the expert load was refused: " +
+                  (st.error.empty() ? std::string("unknown") : st.error);
+            return false;
+        }
+        if (st.bytes != want) {
+            delete a;
+            err = "ArenaExpertSource: the load read " + std::to_string(st.bytes) + " B of " + std::to_string(want);
+            return false;
+        }
+        if (!shared_arena_file.empty() && !a->publish_shared_population()) {
+            delete a;
+            err = "ArenaExpertSource: could not publish shared arena population readiness";
+            return false;
+        }
     }
     arena_ = a;
     base_ = a->data();
@@ -2264,7 +2288,9 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
     blobs_ = n_layers * n_expert;
     n_expert_ = n_expert;
     reads_ = 0;
-    note_ = a->note;
+    note_ = reused_shared_population_
+        ? "shared population ready; source load skipped; " + a->note
+        : a->note;
     gib_per_s_ = st.gib_per_second();
     load_seconds_ = st.seconds;
     load_read_s_ = st.read_seconds;
@@ -2280,6 +2306,7 @@ void ArenaExpertSource::close() {
     base_ = nullptr;
     blobs_ = 0;
     n_expert_ = 0;
+    reused_shared_population_ = false;
 }
 
 bool ArenaExpertSource::pinned(int64_t layer, int64_t expert) const {

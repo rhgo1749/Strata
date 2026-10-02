@@ -27,7 +27,19 @@ int main() {
             std::fprintf(stderr, "first shared arena failed: %s\n", first.note.c_str());
             fail = 1;
         } else {
+            if (first.shared_population_ready()) {
+                std::fprintf(stderr, "fresh shared arena incorrectly started ready\n");
+                fail = 1;
+            }
+            if (!first.begin_shared_population() || first.shared_population_ready()) {
+                std::fprintf(stderr, "shared arena could not enter population-incomplete state\n");
+                fail = 1;
+            }
             first.data()[123] = 0x5a;
+            if (!first.publish_shared_population() || !first.shared_population_ready()) {
+                std::fprintf(stderr, "shared arena readiness was not published\n");
+                fail = 1;
+            }
 
             strata::core::PinnedArena second(bytes, no_bounds, 0, path, pack_hash);
             if (!second.valid()) {
@@ -35,6 +47,18 @@ int main() {
                 fail = 1;
             } else if (second.data()[123] != 0x5a) {
                 std::fprintf(stderr, "shared mapping did not expose the same bytes\n");
+                fail = 1;
+            } else if (!second.shared_population_ready()) {
+                std::fprintf(stderr, "second mapping did not observe published readiness\n");
+                fail = 1;
+            }
+
+            if (!first.begin_shared_population() || second.shared_population_ready()) {
+                std::fprintf(stderr, "population-incomplete state was not visible across mappings\n");
+                fail = 1;
+            }
+            if (!first.publish_shared_population() || !second.shared_population_ready()) {
+                std::fprintf(stderr, "re-published readiness was not visible across mappings\n");
                 fail = 1;
             }
 
