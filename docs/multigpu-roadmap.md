@@ -6,7 +6,7 @@ Roadmap authority is GitHub Issue #1 and its child Issues. This document summari
 
 ## Current production baseline
 
-The current promoted engine generation is **Strata 0.1.31** in this fork, integrated from upstream `9259cad4cfa3543cd3b8decab5962672b968c649`.
+The current promoted engine generation is **Strata 0.1.34** in this fork, integrated from upstream `1678de333d0e0711bc414ad992b640e1a37dd814`. The 0.1.34 compatibility gate preserves the independent-lane architecture; upstream's newer layer-split/prefill path is treated as a stronger single-request challenger, not as a replacement for request-level lanes.
 
 The architectural baseline is:
 
@@ -167,7 +167,7 @@ Until measurements justify them, this roadmap does **not** assume that Strata sh
 
 ## Near-term order
 
-1. Keep the completed Phase 1/2 serving-control and Phase 3 lifecycle gates as regression controls on the promoted 0.1.31 baseline.
+1. Keep the completed Phase 1/2 serving-control and Phase 3 lifecycle gates as regression controls on the promoted 0.1.34 software baseline; retain the measured 0.1.30/0.1.31 evidence under its original engine generation.
 2. Do not add another mandatory serving phase without a measured residual.
 3. Run conditional architecture challengers only when their documented trigger fires; upstream peer/expert-tier work is an execution primitive to evaluate separately, not an automatic replacement for independent lanes.
 
