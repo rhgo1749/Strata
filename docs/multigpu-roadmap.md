@@ -101,19 +101,22 @@ If it degrades materially, adapt only a small set of interpretable policy weight
 
 **Exit condition:** the serving control improves a declared end-to-end or tail objective over strong simple baselines without regressing correctness, fairness, or failure isolation.
 
-## Phase 3 — Startup/runtime lifecycle overhead
+## Phase 3 — Startup/runtime lifecycle overhead (implemented / validated)
 
-After steady-state serving control is measured and stable, remove duplicated lifecycle cost without changing the inference model.
+The promoted design removes repeated shared-arena source loading without changing the independent-lane inference model.
 
-Candidates:
+Implemented contract:
 
-- one authoritative shared-arena population path with safe follower attach;
-- faster lane restart/readiness;
-- explicit arena ownership/lifecycle metadata;
-- strong model/config/backing identity checks;
-- optional safe reuse/persistence where correctness can be proved.
+- lane 0 is the authoritative population leader for each supervisor generation;
+- the shared header is marked incomplete before population and ready only after the full source load succeeds;
+- later sequential lanes attach as followers, verify size/pack identity/readiness, and skip the repeated source expert load;
+- the supervisor holds one non-blocking ownership lock for the arena pathname, preventing concurrent supervisors from repopulating the same backing;
+- a new leader repopulates an existing compatible backing rather than trusting stale contents as persistent cache state;
+- default supervisor-managed tmpfs backing is removed on graceful exit; explicit `--arena-file` lifetime remains operator-owned.
 
-This is operationally useful but should not displace higher-value steady-state serving work.
+The reference-host promotion gate showed a matched 3-lane startup reduction while preserving text, vision, multi-turn affinity, malformed-input, cancellation, and recovery behavior. Hardware-specific timing belongs in the recipe repository.
+
+Automatic child-process respawn and persistent cross-run arena reuse are not introduced by this phase. They remain separate lifecycle work only if a measured operational need justifies them.
 
 ## Conditional architecture challengers
 
@@ -176,8 +179,8 @@ Until measurements justify them, this roadmap does **not** assume that Strata sh
 
 ## Near-term order
 
-1. Run Phase 3 startup/runtime lifecycle work on the promoted 0.1.31 baseline.
-2. Keep the completed Phase 1/2 benchmark, correctness, affinity, overload, and placement gates as regression controls.
-3. Run conditional architecture challengers only when a measured trigger fires; upstream peer/expert-tier work is an execution primitive to evaluate separately, not an automatic replacement for independent lanes.
+1. Keep the completed Phase 1/2 serving-control and Phase 3 lifecycle gates as regression controls on the promoted 0.1.31 baseline.
+2. Do not add another mandatory serving phase without a measured residual.
+3. Run conditional architecture challengers only when their documented trigger fires; upstream peer/expert-tier work is an execution primitive to evaluate separately, not an automatic replacement for independent lanes.
 
 The default bias remains deliberate simplicity: add coupling only when measurements show it buys something.

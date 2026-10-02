@@ -257,6 +257,7 @@ struct Options {
     bool no_host_worker = false;
     bool mmap_experts = false;    ///< R2.1: opt OUT of the resident arena, back to MapViewOfFile
     std::string shared_expert_arena; ///< Linux: optional file backing for the resident arena shared by processes
+    bool shared_expert_arena_follower = false; ///< attach only after another process published a complete population
     bool resident_cpu_experts = false; ///< mmap-backed static-cache misses copied into ordinary RAM
     /// `--resident-experts` (the low-RAM PC's resident mode, chosen by setup): `--resident-cpu-experts` with the copy
     /// page-locked when the driver allows (else locked in the working set), 4 GiB of RAM headroom, and plain mmap
@@ -546,6 +547,8 @@ void usage() {
                  "  --shared-expert-arena FILE  Linux: back the resident arena with one MAP_SHARED file.\n"
                  "                       Put this file on /dev/shm, not ordinary SSD storage.\n"
                  "                       A small header binds an existing backing file to the same pack.\n"
+                 "  --shared-expert-arena-follower  attach to a fully populated shared arena and skip the source\n"
+                 "                       expert load; refused unless the shared header has published readiness.\n"
                  "  --resident-cpu-experts  with mmap and a static profile, keep the experts the GPU cache does not\n"
                  "                       hold resident in ordinary RAM (and the prompt path's lend region as far as\n"
                  "                       RAM allows); adaptive swaps exchange them, so none is read from the file again.\n"
@@ -1174,6 +1177,7 @@ int main(int argc, char** argv) {
         else if (a == "--gpu-stages") o.gpu_stages = true;
         else if (a == "--mmap-experts") o.mmap_experts = true;
         else if (a == "--shared-expert-arena") o.shared_expert_arena = next("--shared-expert-arena");
+        else if (a == "--shared-expert-arena-follower") o.shared_expert_arena_follower = true;
         else if (a == "--resident-cpu-experts") o.resident_cpu_experts = true;
         else if (a == "--resident-experts") {
             o.mmap_experts = o.resident_cpu_experts = o.resident_pin = o.resident_soft = true;
@@ -1274,6 +1278,10 @@ int main(int argc, char** argv) {
     bool multi_gpu = !split_devs.empty() && !split_same;   // cleared by --split-skip-if-fits before any stage loads
     if (o.mmap_experts && !o.shared_expert_arena.empty()) {
         std::fprintf(stderr, "strata generate: --shared-expert-arena backs the resident arena and cannot be used with --mmap-experts\n");
+        return 2;
+    }
+    if (o.shared_expert_arena_follower && o.shared_expert_arena.empty()) {
+        std::fprintf(stderr, "strata generate: --shared-expert-arena-follower requires --shared-expert-arena FILE\n");
         return 2;
     }
     if (o.resident_cpu_experts && (!o.mmap_experts || o.expert_profile.empty())) {
@@ -2427,14 +2435,18 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata generate: multi-GPU under WDDM: at most 8 GiB of the expert arena is pinned "
                                  "(STRATA_ARENA_PIN_GIB changes it)\n");
         if (!arena_src.open(o.pack, g.n_layers, g.n_expert, /*threads=*/6, err, pin_limit,
-                            o.shared_expert_arena)) {
+                            o.shared_expert_arena, o.shared_expert_arena_follower)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;
         }
         std::fprintf(stderr, "strata generate: expert arena: %s\n", arena_src.note().c_str());
-        std::fprintf(stderr, "strata generate: loaded %.2f GiB at %.2f GiB/s\n",
-                     (double) strata::kernels::cpu::expert_layout().total / (1024.0 * 1024 * 1024),
-                     arena_src.load_gib_per_second());
+        if (arena_src.reused_shared_population()) {
+            std::fprintf(stderr, "strata generate: shared expert population already ready; source load skipped\n");
+        } else {
+            std::fprintf(stderr, "strata generate: loaded %.2f GiB at %.2f GiB/s\n",
+                         (double) strata::kernels::cpu::expert_layout().total / (1024.0 * 1024 * 1024),
+                         arena_src.load_gib_per_second());
+        }
         // A rate under ~0.2 GiB/s is not the hardware.  Task Scheduler / service contexts throttle this
         // read+fill about 24x (measured 0.05 vs 1.42 GiB/s for the same binary, args and cache state; the
         // scheduler's defaults - Below normal priority and a least-privilege token - were the only
