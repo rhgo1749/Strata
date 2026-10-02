@@ -151,19 +151,7 @@ A challenger must demonstrate all of the following on repeated runs:
 
 ## Boundary with model-internal research
 
-This roadmap is **serving/runtime only**.
-
-Sparse-attention/QSA/indexer training, PEFT, and model-internal retrieval policy are separate research. They are not later phases of this serving roadmap.
-
-If Phase 1/2 measurements show a residual request-local long-context bottleneck after placement, queueing, and admission have been addressed, serving may export a neutral benchmark envelope:
-
-- context/session distributions;
-- latency decomposition;
-- model-stage timing when already observable;
-- memory-traffic envelope;
-- serving SLO/quality constraints.
-
-A separate model-research track may use that evidence. Any result returns to serving only after it independently demonstrates a useful quality/latency/memory Pareto improvement and can be exposed as a validated capability/profile without making the scheduler depend on the training method.
+This roadmap is **serving/runtime only**. Model-internal training or architecture research is out of scope for this repository and is not a prerequisite for serving progress.
 
 ## Explicit non-goals
 
@@ -174,7 +162,7 @@ Until measurements justify them, this roadmap does **not** assume that Strata sh
 - merge lane-local session state into one distributed failure domain;
 - implement unified KV merely for symmetry;
 - introduce learned scheduling before simpler controls fail;
-- make QSA/indexer research a prerequisite for serving progress;
+- make model-internal research a prerequisite for serving progress;
 - optimize benchmark aesthetics at the expense of real serving behavior.
 
 ## Near-term order
