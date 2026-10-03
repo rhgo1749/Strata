@@ -40,20 +40,21 @@ def one(port,content,max_tokens,session=None):
  offered=m.get('drafts_offered') or 0; accepted=m.get('drafts_accepted') or 0
  return {'client_s':e,'completion_tokens':data['usage']['completion_tokens'],'prompt_tokens':m.get('prompt_tokens'),'reused':m.get('reused'),'prompt_ms':m.get('prompt_ms'),'pp':(m.get('prompt_tokens')/(m.get('prompt_ms')/1000)) if m.get('prompt_tokens') and m.get('prompt_ms') else None,'decode_ms':m.get('decode_ms'),'decode_tok_s':m.get('decode_tok_s'),'accept':accepted/offered if offered else None,'metric':m}
 def main():
- ap=argparse.ArgumentParser(); ap.add_argument('--port',type=int,required=True); ap.add_argument('--arm',required=True); ap.add_argument('--out',required=True); a=ap.parse_args()
+ ap=argparse.ArgumentParser(); ap.add_argument('--port',type=int,required=True); ap.add_argument('--arm',required=True); ap.add_argument('--out',required=True); ap.add_argument('--decode-only',action='store_true'); ap.add_argument('--warm-reps',type=int,default=5); a=ap.parse_args()
  out={'arm':a.arm,'port':a.port,'bench_start_epoch':time.time(),'cold':{},'warm':[]}
- for target,label in [(1500,'short'),(15000,'medium')]:
-  rows=[]
-  for i in range(3):
-   c,n=make_prompt(target,f'decode-assist-{label}-{i}')
-   rows.append(one(a.port,c,16,f'{a.arm}-cold-{label}-{i}'))
-  out['cold'][label]=rows
+ if not a.decode_only:
+  for target,label in [(1500,'short'),(15000,'medium')]:
+   rows=[]
+   for i in range(3):
+    c,n=make_prompt(target,f'decode-assist-{label}-{i}')
+    rows.append(one(a.port,c,16,f'{a.arm}-cold-{label}-{i}'))
+   out['cold'][label]=rows
  warm,n=make_prompt(1500,'decode-assist-warm-fixed')
  one(a.port,warm,128,None); one(a.port,warm,128,None)
- for i in range(5): out['warm'].append(one(a.port,warm,768,None))
+ for i in range(a.warm_reps): out['warm'].append(one(a.port,warm,768,None))
  out['bench_end_epoch']=time.time()
  Path(a.out).write_text(json.dumps(out,indent=2,ensure_ascii=False)+'\n')
  pp={k:statistics.mean([r['pp'] for r in v]) for k,v in out['cold'].items()}
  tg=statistics.mean([r['decode_tok_s'] for r in out['warm']]); acc=statistics.mean([r['accept'] for r in out['warm'] if r['accept'] is not None])
- print(json.dumps({'arm':a.arm,'pp':pp,'warm_tg_mean':tg,'accept_mean':acc,'warm_client_s_mean':statistics.mean([r['client_s'] for r in out['warm']])},indent=2))
+ print(json.dumps({'arm':a.arm,'pp':pp,'warm_tg_mean':tg,'warm_tg_sd':statistics.stdev([r['decode_tok_s'] for r in out['warm']]) if len(out['warm'])>1 else 0.0,'accept_mean':acc,'warm_client_s_mean':statistics.mean([r['client_s'] for r in out['warm']])},indent=2))
 if __name__=='__main__': main()

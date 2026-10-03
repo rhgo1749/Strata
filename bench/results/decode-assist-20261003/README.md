@@ -54,3 +54,22 @@ The 1000-slot 5060 Ti arm is the only configuration close enough to control to j
 ## Resource evidence
 
 Raw GPU telemetry and request metrics are retained under `raw/`. The initial CPU-affinity-contaminated heterogeneous experiment from the earlier 0.1.38 campaign is unrelated and is not used here.
+
+## Matched hot-expert sweep (session 2)
+
+A second matched decode-only sweep reran the control and 500/750/1000/1250/1500-slot RTX 5060 Ti helper arms in one session. Every arm used the same primary GPU, CPU affinity, fixed ~1.5K prompt, two warmups and seven retained 768-token completions. `STRATA_SPLIT_TIMING=1` and the engine's native remote-helper counters were retained alongside 1 s GPU telemetry.
+
+| Helper slots | TG mean ± sd | Accept | Acceptance-adjusted ΔTG | Helper util | Helper power | Helper VRAM | Remote entries/request | Returned MiB/request | Host stage ms/request | Helper wait ms/request | Final stage0 pool+plan ms/window |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | **68.49 ± 1.41** | 0.663 | control | 0% | 4.24 W idle | 2 MiB | — | — | — | — | 8.512 |
+| 500 | 68.46 ± 1.03 | 0.666 | -0.23 | 1.08% | 19.08 W | 1.52 GiB | 2,652 | 25.9 | 26.1 | 6.4 | 8.247 |
+| 750 | 67.79 ± 1.37 | 0.647 | +0.07 | 1.56% | 19.99 W | 1.99 GiB | 4,160 | 40.6 | 36.6 | 11.9 | 8.057 |
+| 1000 | 68.23 ± 0.86 | 0.649 | **+0.42** | 2.13% | 20.68 W | 2.47 GiB | 5,519 | 53.9 | 43.9 | 17.1 | 7.900 |
+| 1250 | 67.76 ± 1.43 | 0.649 | -0.02 | 2.76% | 21.45 W | 2.96 GiB | 7,156 | 69.9 | 53.9 | 23.0 | 7.897 |
+| 1500 | 68.34 ± 1.05 | 0.660 | -0.02 | 3.15% | 21.88 W | 3.43 GiB | 8,385 | 81.9 | 59.3 | 28.6 | 7.733 |
+
+The acceptance-adjusted model uses all 42 retained samples (`decode_tok_s ~ speculative_acceptance + arm`, control reference). The best point, 1000 slots, is only **+0.42 tok/s with SE 0.30 tok/s**, so its approximate 95% interval crosses zero. No slot count in this sweep establishes a repeatable decode-throughput win.
+
+The mechanistic signal is still useful: as slots increase, the verifier's cumulative `pool + plan` term falls from 8.512 to 7.733 ms/window, showing real CPU-side work reduction, while helper entries, returned bytes, staging time, wait time, VRAM and power all rise monotonically. The current host-staged helper path therefore trades less CPU expert work for more cross-device coordination without a proven end-to-end TG gain. A shallow optimum may exist around ~1000 slots, but it is not yet distinguishable from run-to-run/speculative-acceptance variance.
+
+**Decision:** keep decode assist experimental and do not promote it into production scheduling. A future follow-up should only proceed if it can reduce the host-staged synchronization cost or measure a workload where CPU expert drain is materially worse than this warm 1.5K/decode regime; simply adding more helper slots is not supported by this sweep.
