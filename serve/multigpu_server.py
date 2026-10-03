@@ -87,11 +87,17 @@ def remove_flag(args: list[str], name: str) -> list[str]:
     return [arg for arg in args if arg != name]
 
 
-def sanitize_lane_config(cfg: dict) -> dict:
+def sanitize_lane_config(cfg: dict, *, allow_profile_persistence: bool = False) -> dict:
     """Return a lane-local config that cannot re-expand into an upstream multi-GPU engine."""
     lane_cfg = copy.deepcopy(cfg)
     lane_cfg.pop("gpu", None)
     lane_cfg.pop("layer_split", None)
+    if not allow_profile_persistence:
+        # server.py can synthesize the CLI writer flags from these top-level
+        # keys, so stripping only cfg["args"] would still leave several lanes
+        # writing the same learned-profile path.
+        lane_cfg.pop("expert_profile_save", None)
+        lane_cfg.pop("expert_profile_save_every", None)
     if isinstance(lane_cfg.get("args"), list):
         args = list(lane_cfg["args"])
         # Ordinary Lanes own exactly one physical GPU.  Upstream 0.1.38 adds
@@ -116,9 +122,12 @@ def sanitize_lane_config(cfg: dict) -> dict:
 
         # Upstream 0.1.36 can persist an adaptive expert profile.  A copied
         # parent path would give several lane processes the same writer, so
-        # keep persistence disabled until Lanes assigns lane-local ownership.
-        args = remove_option(args, "--expert-profile-save")
-        args = remove_option(args, "--expert-profile-save-every")
+        # keep persistence disabled for multi-lane operation until Lanes
+        # assigns lane-local ownership.  A one-lane supervisor has one writer
+        # and keeps the upstream behavior.
+        if not allow_profile_persistence:
+            args = remove_option(args, "--expert-profile-save")
+            args = remove_option(args, "--expert-profile-save-every")
 
         # Upstream 0.1.30 can park multiple conversations inside one engine.
         # The lane scheduler does not yet advertise or route against parked
@@ -1547,7 +1556,10 @@ def main() -> int:
 
     lanes: list[Lane] = []
     for i, (gpu, ctx) in enumerate(zip(gpus, contexts)):
-        lane_cfg = bind_lane_gpu(sanitize_lane_config(cfg), gpu)
+        lane_cfg = bind_lane_gpu(
+            sanitize_lane_config(cfg, allow_profile_persistence=(len(gpus) == 1)),
+            gpu,
+        )
         lane_vision = i in vision_lanes
         lane_cfg = apply_vision_capability(lane_cfg, lane_vision)
         lane_cfg = apply_shared_arena(

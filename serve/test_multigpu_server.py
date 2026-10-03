@@ -65,7 +65,10 @@ class MultiGpuPlanningTests(unittest.TestCase):
         self.assertIn("--layer-split", cfg["args"])
 
     def test_lane_config_strips_upstream_multigpu_and_shared_profile_writers(self):
-        cfg = {"args": [
+        cfg = {
+            "expert_profile_save": "/tmp/top-level-shared.profile",
+            "expert_profile_save_every": 7,
+            "args": [
             "--pack", "/m",
             "--split-device", "1",
             "--peer-device", "1",
@@ -99,6 +102,26 @@ class MultiGpuPlanningTests(unittest.TestCase):
             "--expert-profile-save-every",
         ):
             self.assertNotIn(name, got["args"])
+        self.assertEqual(M.option_value(got["args"], "--expert-profile"), "/tmp/read-only.profile")
+        self.assertNotIn("expert_profile_save", got)
+        self.assertNotIn("expert_profile_save_every", got)
+
+    def test_single_lane_sanitizer_preserves_profile_persistence(self):
+        cfg = {
+            "expert_profile_save": "/tmp/learned.profile",
+            "expert_profile_save_every": 7,
+            "args": [
+                "--pack", "/m",
+                "--expert-profile-save", "/tmp/learned-cli.profile",
+                "--expert-profile-save-every", "5",
+                "--expert-profile", "/tmp/read-only.profile",
+            ],
+        }
+        got = M.sanitize_lane_config(cfg, allow_profile_persistence=True)
+        self.assertEqual(got["expert_profile_save"], "/tmp/learned.profile")
+        self.assertEqual(got["expert_profile_save_every"], 7)
+        self.assertEqual(M.option_value(got["args"], "--expert-profile-save"), "/tmp/learned-cli.profile")
+        self.assertEqual(M.option_value(got["args"], "--expert-profile-save-every"), "5")
         self.assertEqual(M.option_value(got["args"], "--expert-profile"), "/tmp/read-only.profile")
 
     def test_bound_lane_config_uses_single_physical_gpu_for_telemetry(self):
