@@ -73,3 +73,24 @@ The acceptance-adjusted model uses all 42 retained samples (`decode_tok_s ~ spec
 The mechanistic signal is still useful: as slots increase, the verifier's cumulative `pool + plan` term falls from 8.512 to 7.733 ms/window, showing real CPU-side work reduction, while helper entries, returned bytes, staging time, wait time, VRAM and power all rise monotonically. The current host-staged helper path therefore trades less CPU expert work for more cross-device coordination without a proven end-to-end TG gain. A shallow optimum may exist around ~1000 slots, but it is not yet distinguishable from run-to-run/speculative-acceptance variance.
 
 **Decision:** keep decode assist experimental and do not promote it into production scheduling. A future follow-up should only proceed if it can reduce the host-staged synchronization cost or measure a workload where CPU expert drain is materially worse than this warm 1.5K/decode regime; simply adding more helper slots is not supported by this sweep.
+
+## Transport and critical-path follow-up (session 3)
+
+This session tested three concrete explanations for the missing decode gain at the 1000-slot operating point.
+
+1. **Mapped-host zero-copy vs explicit async copies.** `STRATA_REMOTE_ZEROCOPY=0` measured 68.11 tok/s versus the retained default-zero-copy result around 68.23 tok/s at effectively identical speculative acceptance. The default zero-copy path is not the observed bottleneck.
+2. **Helper CUDA scheduling.** `STRATA_REMOTE_SPIN=0` measured 68.06 tok/s and did not improve the result. Spin scheduling is not the observed bottleneck.
+3. **Repeated CUDA device switching.** An experimental single-helper-only sticky-device patch held the helper CUDA device across the CPU-pool interval, cutting the primary↔helper context-switch pair from two scopes to one. On the same patched binary, OFF measured 68.13 ± 1.20 tok/s and ON measured 68.11 ± 1.41 tok/s. Native helper timing was also unchanged (`begin` about 44 ms/request, `wait` about 18 ms/request). The device-switch hypothesis is rejected for this workload.
+
+The stronger explanation is **critical-path slack**. In the matched sweep, stage-0 timing is roughly 19 ms/window waiting for the primary GPU versus only ~8 ms/window in `pool + plan`. The CPU expert pool therefore completes well before the primary GPU path. A helper can reduce CPU work without reducing wall time because that work is already hidden under primary-GPU execution.
+
+A mechanism probe with `--pool-workers 4` confirms the same operating regime:
+
+| Arm | Warm TG | Spec accept | Final GPU wait | Final pool+plan |
+| --- | ---: | ---: | ---: | ---: |
+| 4 CPU workers, no helper | **68.58** | 0.665 | 18.991 ms/window | 8.608 ms/window |
+| 4 CPU workers + 1000-slot 5060 Ti helper | **68.56** | 0.654 | 19.437 ms/window | 7.859 ms/window |
+
+Even four CPU workers remain comfortably off the critical path on the reference 9950X3D host. The helper measurably lowers CPU pool work but cannot accelerate decode until CPU expert work approaches or exceeds the primary-GPU stage time.
+
+**Current conclusion:** the P2P-free helper is not a useful production accelerator on this reference host/workload. Its likely applicability is a more CPU-constrained host, a workload/configuration with materially higher CPU expert drain, or a future execution path that changes the primary-GPU critical path. Further slot tuning or micro-optimizing helper context/staging on this host is not justified by the current evidence.

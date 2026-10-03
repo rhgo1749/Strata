@@ -3284,6 +3284,11 @@ int main(int argc, char** argv) {
     Drive drive;
     for (int r = 0; r < 3; ++r) if (o.expert_cache_remote[(size_t) r] > 0)
         drive.d.remote[drive.d.remote_count++] = &remote_experts[(size_t) r];
+    const char* sticky_remote = std::getenv("STRATA_REMOTE_STICKY_DEVICE");
+    if (drive.d.remote_count == 1 && sticky_remote && std::atoi(sticky_remote) != 0) {
+        drive.d.remote[0]->set_sticky_device(true);
+        std::fprintf(stderr, "strata generate: remote helper sticky-device A/B enabled (single helper only)\n");
+    }
     drive.d.peer = peer.valid() ? &peer : nullptr;
     drive.d.hit_cpu_order = o.expert_cache_cpu_order;
     drive.d.split_rows = !o.no_split_rows;

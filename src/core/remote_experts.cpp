@@ -45,7 +45,8 @@ struct DeviceScope {
         }
         ok = true;
     }
-    ~DeviceScope() { if (previous >= 0) cudaSetDevice(previous); }
+    bool restore = true;
+    ~DeviceScope() { if (restore && previous >= 0) cudaSetDevice(previous); }
     std::string error(int device) const {
         return std::string("CUDA") + std::to_string(device) + " experts: " +
                (failed_step ? failed_step : "device switch") +
@@ -104,6 +105,9 @@ void RemoteExperts::close() {
         if (h_meta_) cudaFreeHost(h_meta_);
         if (stream_) cudaStreamDestroy(stream_);
     }
+    if (device_held_ && held_previous_device_ >= 0) cudaSetDevice(held_previous_device_);
+    device_held_ = false;
+    held_previous_device_ = -1;
     device_ = -1;
     stream_ = nullptr;
     h_x_ = h_out_ = d_x_ = d_out_ = nullptr;
@@ -310,15 +314,30 @@ bool RemoteExperts::begin(int64_t layer, const float* x, const int32_t* ids, int
     ++launched_layers_;
     returned_bytes_ += compact_bytes;
     full_row_bytes_ += (uint64_t) n * H * sizeof(float);
+    if (sticky_device_) {
+        held_previous_device_ = scope.previous;
+        device_held_ = true;
+        scope.restore = false;
+    }
     return true;
 }
 
 bool RemoteExperts::finish(float* out, std::string& err) {
     if (group_id_.empty()) return true;
-    DeviceScope scope(device_);
-    if (!scope.ok) { err = scope.error(device_); return false; }
     const auto w0 = std::chrono::steady_clock::now();
-    if (!check(cudaStreamSynchronize(stream_), "finish", err, device_)) return false;
+    if (sticky_device_ && device_held_) {
+        const cudaError_t sync = cudaStreamSynchronize(stream_);
+        const int previous = held_previous_device_;
+        device_held_ = false;
+        held_previous_device_ = -1;
+        const cudaError_t restore = previous >= 0 ? cudaSetDevice(previous) : cudaSuccess;
+        if (!check(sync, "finish", err, device_)) return false;
+        if (!check(restore, "restore primary device", err, device_)) return false;
+    } else {
+        DeviceScope scope(device_);
+        if (!scope.ok) { err = scope.error(device_); return false; }
+        if (!check(cudaStreamSynchronize(stream_), "finish", err, device_)) return false;
+    }
     ms_wait_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - w0).count();
     for (size_t i = 0; i < original_row_.size(); ++i)
         std::memcpy(out + (size_t) original_row_[i] * H, h_out_ + i * H, (size_t) H * sizeof(float));

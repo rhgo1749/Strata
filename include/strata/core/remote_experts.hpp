@@ -37,6 +37,7 @@ public:
                std::string& err);
     bool owns(int64_t index) const { return owned_[(size_t) index] != 0; }
     bool finish(float* out, std::string& err);
+    void set_sticky_device(bool enabled) { sticky_device_ = enabled; }
     int64_t resident() const { return cache_.resident(); }
     int64_t computed() const { return computed_; }
     int64_t launched_layers() const { return launched_layers_; }
@@ -56,6 +57,9 @@ private:
     uint64_t returned_bytes_ = 0;
     uint64_t full_row_bytes_ = 0;
     double ms_begin_ = 0, ms_wait_ = 0;
+    bool sticky_device_ = false;      ///< experimental: hold helper CUDA device across CPU-pool work
+    bool device_held_ = false;
+    int held_previous_device_ = -1;
     ExpertCache cache_;
     cudaStream_t stream_ = nullptr;
     float* h_x_ = nullptr;
