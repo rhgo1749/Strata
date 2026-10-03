@@ -583,6 +583,17 @@ def benchmark_console_summary(record: dict) -> str:
     )
 
 
+def lane_service_ready(lane: Lane, timeout: float = 0.2) -> bool:
+    """Return whether the lane wrapper is healthy enough to accept a request."""
+    if lane.process is None or lane.process.poll() is not None:
+        return False
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{lane.port}/health", timeout=timeout) as r:
+            return 200 <= r.status < 300
+    except Exception:
+        return False
+
+
 def lane_engine_alive(lane: Lane, timeout: float = 0.2) -> bool:
     """Return whether both the lane wrapper and its child engine currently expose the model."""
     if lane.process is None or lane.process.poll() is not None:
@@ -843,7 +854,7 @@ class LanePool:
                 self.vision_waiters += 1
             try:
                 while True:
-                    alive = [x for x in self.lanes if lane_engine_alive(x)]
+                    alive = [x for x in self.lanes if lane_service_ready(x)]
                     if not alive:
                         raise RuntimeError("all GPU lanes have stopped")
                     alive_indices = {x.index for x in alive}
@@ -1001,6 +1012,7 @@ class LanePool:
                     "pid": x.process.pid if x.process else None,
                     "wrapper_alive": bool(x.process and x.process.poll() is None),
                     "alive": lane_engine_alive(x),
+                    "routable": lane_service_ready(x),
                     "busy": x.busy,
                     "affinity_sessions": sum(1 for lane_index in self.affinity.values() if lane_index == x.index),
                     "affinity_waiters": self.affinity_waiters.get(x.index, 0),
@@ -1058,6 +1070,24 @@ def require_ports_free(host: str, ports: list[int]) -> None:
                 raise RuntimeError(f"port {host}:{port} is already in use")
         finally:
             s.close()
+
+
+def lane_parking_status(lane: Lane, timeout: float = 0.25) -> dict:
+    """Best-effort engine-truth parking counters from the lane's latest completed request."""
+    if not lane_engine_alive(lane):
+        return {"parked_conversations": None, "parked_bytes": None, "park_evictions": None}
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{lane.port}/metrics", timeout=timeout) as r:
+            payload = json.loads(r.read())
+        rows = payload.get("requests") or []
+        latest = rows[0] if rows else {}
+        return {
+            "parked_conversations": latest.get("parked_conversations"),
+            "parked_bytes": latest.get("parked_bytes"),
+            "park_evictions": latest.get("park_evictions"),
+        }
+    except Exception:
+        return {"parked_conversations": None, "parked_bytes": None, "park_evictions": None}
 
 
 def wait_ready(lane: Lane, timeout: float) -> None:
@@ -1138,6 +1168,10 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                 self.wfile.write(body)
 
         def _status(self):
+            lanes = pool.status()
+            parking = {lane.index: lane_parking_status(lane) for lane in pool.lanes}
+            for row in lanes:
+                row.update(parking.get(row["index"], {}))
             self._json(200, {
                 "status": "ok",
                 "mode": "partitioned-multigpu-v1",
@@ -1150,7 +1184,7 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                 "bench_trace_jsonl": str(bench_trace.path) if bench_trace else None,
                 "bench_console_summary": bench_console_summary,
                 "scheduler_policy": pool.scheduler_policy,
-                "lanes": pool.status(),
+                "lanes": lanes,
             })
 
         def _slots(self):

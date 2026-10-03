@@ -1156,3 +1156,13 @@ class MultiGpuPlanningTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_lane_parking_status_extracts_latest_engine_truth(self):
+        lane = types.SimpleNamespace(index=0, port=19000, process=types.SimpleNamespace(poll=lambda: None))
+        payload = json.dumps({"requests": [{"parked_conversations": 3, "parked_bytes": 1234, "park_evictions": 2}]}).encode()
+        class R:
+            def __enter__(self): return self
+            def __exit__(self,*a): pass
+            def read(self): return payload
+        with mock.patch.object(M, "lane_engine_alive", return_value=True), mock.patch.object(M.urllib.request, "urlopen", return_value=R()):
+            self.assertEqual(M.lane_parking_status(lane), {"parked_conversations": 3, "parked_bytes": 1234, "park_evictions": 2})
