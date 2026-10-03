@@ -122,7 +122,7 @@ Automatic child-process respawn and persistent cross-run arena reuse are not int
 
 These are evidence-triggered branches, not mandatory phases.
 
-### Decode-assist helper GPU (next execution challenger)
+### Decode-assist helper GPU (deferred on 0.1.38; reopen on new evidence)
 
 Evaluate upstream Strata's P2P-free secondary expert caches before adding more topology coupling. This challenger keeps one ordinary lane as the owner of dense/attention execution, KV, session state, MTP/draft state, local expert cache, API semantics, and failure recovery. A secondary GPU is used only as an expert worker for decode/MTP through upstream `--expert-cache-device1/2/3` and pinned host staging. Prompt prefill remains on the primary GPU.
 
@@ -139,6 +139,8 @@ Measure the primary-only control against primary+helper with fixed prompt/model/
 
 Promotion requires a repeatable end-to-end decode/E2E improvement without a material prompt-path regression, without meaningful degradation of unrelated lanes through host/PCIe contention, and with a clean primary-only fallback. Prefer this lower-coupling mechanism over a Super-Lane when it closes the same single-request gap.
 
+**Current status on Strata 0.1.38 / the reference host: deferred, not rejected.** The retained helper sweeps show real CPU expert-pool work reduction but no established end-to-end decode gain because the primary-GPU stage remains the critical path. Do not spend more reference-host effort on slot tuning under the same execution contract. Reopen with a short matched smoke before any full campaign when upstream materially changes remote-expert transport/overlap/synchronization, when primary-GPU execution becomes faster enough to expose CPU expert drain, or when testing a materially more CPU-constrained host/workload.
+
 ### Super-Lane execution groups
 
 Treat a Super-Lane as a scheduler-level execution group: one logical lane may own either one GPU or a fixed multi-GPU Strata engine while the rest of the serving control plane continues to route whole requests/sessions between logical lanes.
@@ -154,9 +156,11 @@ Measure the crossover rather than assuming aggregation wins: single-request TTFT
 
 Do **not** begin with dynamic GPU bonding. Reopen bond/unbond policy only if the static `1+1+1` versus `2+1` experiment demonstrates a repeatable workload-dependent crossover large enough to justify topology changes. Any dynamic version must retain a clean independent-lane fallback and must not migrate an active session merely to rebalance GPUs.
 
+**Current status on Strata 0.1.38 / the reference host: deferred, evidence-negative as an always-on topology, but intentionally left open.** The matched static probe preserved the known single-request benefit (~99 tok/s for the two-GPU Super-Lane versus ~68 tok/s for an ordinary lane), but `2+1` did not establish a useful M=2 aggregate advantage and regressed M=3 aggregate goodput by about 15% versus `1+1+1`. This does not reject upstream layer split as a primitive. Reopen with a short single-request smoke, then M=2, then M=3 only if upstream materially improves layer-split decode/prefill, handoff/staging, split-auto placement, queueing/FIFO behavior, or another relevant execution path enough to move the crossover.
+
 ### Elastic Super-Lane lifecycle
 
-Treat upstream engine load/unload and lazy-start controls as lifecycle primitives, not as a reason to introduce dynamic GPU bonding early. Evaluate this challenger only after a static Super-Lane demonstrates a repeatable workload-dependent advantage.
+Treat upstream engine load/unload and lazy-start controls as lifecycle primitives, not as a reason to introduce dynamic GPU bonding early. **This challenger remains deferred rather than closed.** Evaluate it only after a future static Super-Lane recheck demonstrates a repeatable workload-dependent advantage large enough to survive drain/reconfigure/load/restore cost.
 
 The first elastic experiment should use an explicit drain/reconfigure/restore sequence:
 
@@ -239,7 +243,8 @@ Until measurements justify them, this roadmap does **not** assume that Strata sh
 
 1. Keep the completed Phase 1/2 serving-control and Phase 3 lifecycle gates as regression controls on the promoted 0.1.38 software baseline; retain the measured 0.1.30/0.1.31 evidence under its original engine generation.
 2. Do not add another mandatory serving phase without a measured residual.
-3. Evaluate the lowest-coupling challengers first: profile-guided cache/routing and lane-local conversation parking remain inside the independent-lane model; **P2P-free decode assist (#23) is the next multi-GPU execution challenger** when single-request decode underutilization matters; static layer-split Super-Lane follows only if helper offload leaves a material gap; elastic Super-Lane lifecycle remains gated on a successful static crossover; cross-lane migration stays later.
-4. Treat upstream helper, peer, layer-split and load/unload controls as distinct execution/lifecycle primitives: helper offload is valid without P2P, peer execution is deferred on hardware without a validated P2P path, and neither automatically replaces independent lanes.
+3. Keep the completed decode-assist and static `2+1` measurements as **0.1.38 evidence-negative / deferred challengers**, not permanent rejections. Do not repeat the same reference-host sweeps without a material upstream, hardware, or workload change.
+4. Reopen decode assist or static Super-Lane with the smallest staged smoke that can show the crossover moved; only then repeat broader concurrency or lifecycle campaigns. Elastic Super-Lane remains gated on a successful future static crossover; cross-lane migration stays later.
+5. Treat upstream helper, peer, layer-split and load/unload controls as distinct execution/lifecycle primitives: helper offload is valid without P2P, peer execution is deferred on hardware without a validated P2P path, and neither automatically replaces independent lanes.
 
 The default bias remains deliberate simplicity: add coupling only when measurements show it buys something.
