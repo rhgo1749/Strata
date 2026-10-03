@@ -1,0 +1,204 @@
+{
+  "start": 1791034611.3371634,
+  "turns": [
+    {
+      "turn": 1,
+      "wall_s": 5.61917214999994,
+      "rows": [
+        {
+          "sid": "canary0",
+          "turn": 1,
+          "e2e_s": 5.0383136729979014,
+          "queue_ms": 2544.815,
+          "lane": 1,
+          "cached": 0,
+          "prompt": 716,
+          "completion": 6
+        },
+        {
+          "sid": "canary1",
+          "turn": 1,
+          "e2e_s": 2.547584910000296,
+          "queue_ms": 3.536,
+          "lane": 1,
+          "cached": 0,
+          "prompt": 716,
+          "completion": 6
+        },
+        {
+          "sid": "canary2",
+          "turn": 1,
+          "e2e_s": 1.6621337340002356,
+          "queue_ms": 2.177,
+          "lane": 0,
+          "cached": 0,
+          "prompt": 716,
+          "completion": 6
+        },
+        {
+          "sid": "canary3",
+          "turn": 1,
+          "e2e_s": 5.616919749001681,
+          "queue_ms": 2993.214,
+          "lane": 2,
+          "cached": 0,
+          "prompt": 716,
+          "completion": 64
+        },
+        {
+          "sid": "canary4",
+          "turn": 1,
+          "e2e_s": 2.9970702799982973,
+          "queue_ms": 7.176,
+          "lane": 2,
+          "cached": 0,
+          "prompt": 716,
+          "completion": 64
+        },
+        {
+          "sid": "canary5",
+          "turn": 1,
+          "e2e_s": 4.640293933000066,
+          "queue_ms": 1658.401,
+          "lane": 0,
+          "cached": 0,
+          "prompt": 716,
+          "completion": 64
+        }
+      ]
+    },
+    {
+      "turn": 2,
+      "wall_s": 3.6681467380003596,
+      "rows": [
+        {
+          "sid": "canary0",
+          "turn": 2,
+          "e2e_s": 1.47288346699861,
+          "queue_ms": 2.073,
+          "lane": 1,
+          "cached": 721,
+          "prompt": 816,
+          "completion": 6
+        },
+        {
+          "sid": "canary1",
+          "turn": 2,
+          "e2e_s": 3.013733781001065,
+          "queue_ms": 1473.948,
+          "lane": 1,
+          "cached": 721,
+          "prompt": 816,
+          "completion": 6
+        },
+        {
+          "sid": "canary2",
+          "turn": 2,
+          "e2e_s": 1.0035945309973613,
+          "queue_ms": 7.552,
+          "lane": 0,
+          "cached": 721,
+          "prompt": 816,
+          "completion": 6
+        },
+        {
+          "sid": "canary3",
+          "turn": 2,
+          "e2e_s": 3.6670842849998735,
+          "queue_ms": 1808.237,
+          "lane": 2,
+          "cached": 709,
+          "prompt": 875,
+          "completion": 64
+        },
+        {
+          "sid": "canary4",
+          "turn": 2,
+          "e2e_s": 1.8070479160014656,
+          "queue_ms": 4.654,
+          "lane": 2,
+          "cached": 780,
+          "prompt": 875,
+          "completion": 64
+        },
+        {
+          "sid": "canary5",
+          "turn": 2,
+          "e2e_s": 2.8914295789982134,
+          "queue_ms": 1004.176,
+          "lane": 0,
+          "cached": 779,
+          "prompt": 875,
+          "completion": 64
+        }
+      ]
+    },
+    {
+      "turn": 3,
+      "wall_s": 3.2162071990023833,
+      "rows": [
+        {
+          "sid": "canary0",
+          "turn": 3,
+          "e2e_s": 1.605084598002577,
+          "queue_ms": 3.245,
+          "lane": 1,
+          "cached": 823,
+          "prompt": 916,
+          "completion": 6
+        },
+        {
+          "sid": "canary1",
+          "turn": 3,
+          "e2e_s": 3.2152737110009184,
+          "queue_ms": 1605.446,
+          "lane": 1,
+          "cached": 823,
+          "prompt": 916,
+          "completion": 6
+        },
+        {
+          "sid": "canary2",
+          "turn": 3,
+          "e2e_s": 1.074645969998528,
+          "queue_ms": 7.496,
+          "lane": 0,
+          "cached": 823,
+          "prompt": 916,
+          "completion": 6
+        },
+        {
+          "sid": "canary3",
+          "turn": 3,
+          "e2e_s": 3.1823056139983237,
+          "queue_ms": 1643.497,
+          "lane": 2,
+          "cached": 938,
+          "prompt": 1034,
+          "completion": 63
+        },
+        {
+          "sid": "canary4",
+          "turn": 3,
+          "e2e_s": 1.64341148099993,
+          "queue_ms": 8.767,
+          "lane": 2,
+          "cached": 938,
+          "prompt": 1034,
+          "completion": 53
+        },
+        {
+          "sid": "canary5",
+          "turn": 3,
+          "e2e_s": 2.709004025997274,
+          "queue_ms": 1074.798,
+          "lane": 0,
+          "cached": 939,
+          "prompt": 1034,
+          "completion": 55
+        }
+      ]
+    }
+  ],
+  "end": 1791034628.8410597
+}
