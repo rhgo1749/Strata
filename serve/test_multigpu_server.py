@@ -64,6 +64,43 @@ class MultiGpuPlanningTests(unittest.TestCase):
         self.assertIn("gpu", cfg)
         self.assertIn("--layer-split", cfg["args"])
 
+    def test_lane_config_strips_upstream_multigpu_and_shared_profile_writers(self):
+        cfg = {"args": [
+            "--pack", "/m",
+            "--split-device", "1",
+            "--peer-device", "1",
+            "--peer-reserve-mib", "700",
+            "--peer-slots", "1024",
+            "--peer-adapt-swaps", "2",
+            "--peer-prefill-rows", "4096",
+            "--expert-cache-device1", "100",
+            "--expert-cache-device2", "200",
+            "--expert-cache-device3", "300",
+            "--expert-cache-remote-placement", "layer",
+            "--split-skip-if-fits",
+            "--expert-profile-save", "/tmp/shared.profile",
+            "--expert-profile-save-every", "5",
+            "--expert-profile", "/tmp/read-only.profile",
+        ]}
+        got = M.sanitize_lane_config(cfg)
+        for name in (
+            "--split-device",
+            "--peer-device",
+            "--peer-reserve-mib",
+            "--peer-slots",
+            "--peer-adapt-swaps",
+            "--peer-prefill-rows",
+            "--expert-cache-device1",
+            "--expert-cache-device2",
+            "--expert-cache-device3",
+            "--expert-cache-remote-placement",
+            "--split-skip-if-fits",
+            "--expert-profile-save",
+            "--expert-profile-save-every",
+        ):
+            self.assertNotIn(name, got["args"])
+        self.assertEqual(M.option_value(got["args"], "--expert-profile"), "/tmp/read-only.profile")
+
     def test_bound_lane_config_uses_single_physical_gpu_for_telemetry(self):
         cfg = {"gpu": [0, 1, 2], "layer_split": "16,32",
                "args": ["--pack", "/m", "--layer-split", "auto"]}

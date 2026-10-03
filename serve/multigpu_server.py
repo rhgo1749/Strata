@@ -88,17 +88,44 @@ def remove_flag(args: list[str], name: str) -> list[str]:
 
 
 def sanitize_lane_config(cfg: dict) -> dict:
-    """Return a lane-local config that cannot re-expand itself into upstream layer-split mode."""
+    """Return a lane-local config that cannot re-expand into an upstream multi-GPU engine."""
     lane_cfg = copy.deepcopy(cfg)
     lane_cfg.pop("gpu", None)
     lane_cfg.pop("layer_split", None)
     if isinstance(lane_cfg.get("args"), list):
-        lane_cfg["args"] = remove_option(lane_cfg["args"], "--layer-split")
+        args = list(lane_cfg["args"])
+        # Ordinary Lanes own exactly one physical GPU.  Upstream 0.1.38 adds
+        # several opt-in ways for one engine to consume extra GPUs; strip all
+        # inherited forms here so only a future explicit Super-Lane backend can
+        # re-enable them.
+        for name in (
+            "--layer-split",
+            "--split-device",
+            "--peer-device",
+            "--peer-reserve-mib",
+            "--peer-slots",
+            "--peer-adapt-swaps",
+            "--peer-prefill-rows",
+            "--expert-cache-device1",
+            "--expert-cache-device2",
+            "--expert-cache-device3",
+            "--expert-cache-remote-placement",
+        ):
+            args = remove_option(args, name)
+        args = remove_flag(args, "--split-skip-if-fits")
+
+        # Upstream 0.1.36 can persist an adaptive expert profile.  A copied
+        # parent path would give several lane processes the same writer, so
+        # keep persistence disabled until Lanes assigns lane-local ownership.
+        args = remove_option(args, "--expert-profile-save")
+        args = remove_option(args, "--expert-profile-save-every")
+
         # Upstream 0.1.30 can park multiple conversations inside one engine.
         # The lane scheduler does not yet advertise or route against parked
         # snapshot ownership, so keep one live conversation state per lane
         # until that cross-layer contract is implemented explicitly.
-        lane_cfg["args"] = replace_option(lane_cfg["args"], "--conversation-cache-mib", 0)
+        args = replace_option(args, "--conversation-cache-mib", 0)
+        lane_cfg["args"] = args
     return lane_cfg
 
 

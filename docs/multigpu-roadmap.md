@@ -6,7 +6,7 @@ Roadmap authority is GitHub Issue #1 and its child Issues. This document summari
 
 ## Current production baseline
 
-The current promoted engine generation is **Strata 0.1.34** in this fork, integrated from upstream `1678de333d0e0711bc414ad992b640e1a37dd814`. The 0.1.34 compatibility gate preserves the independent-lane architecture; upstream's newer layer-split/prefill path is treated as a stronger single-request challenger, not as a replacement for request-level lanes.
+The current promoted engine generation is **Strata 0.1.38** in this fork, integrated from upstream `99f3dbd0b21d1401b3769e0c0d963913607f380b`. The 0.1.38 compatibility gate preserves the independent-lane architecture while consuming upstream prompt/decode, reliability, security/status, profile-persistence, unbuffered-load, and optional peer-tier primitives. Upstream layer-split/peer execution remains a challenger/backend primitive rather than a replacement for request-level lanes.
 
 The architectural baseline is:
 
@@ -219,7 +219,7 @@ Until measurements justify them, this roadmap does **not** assume that Strata sh
 
 ## Near-term order
 
-1. Keep the completed Phase 1/2 serving-control and Phase 3 lifecycle gates as regression controls on the promoted 0.1.34 software baseline; retain the measured 0.1.30/0.1.31 evidence under its original engine generation.
+1. Keep the completed Phase 1/2 serving-control and Phase 3 lifecycle gates as regression controls on the promoted 0.1.38 software baseline; retain the measured 0.1.30/0.1.31 evidence under its original engine generation.
 2. Do not add another mandatory serving phase without a measured residual.
 3. Evaluate the lowest-coupling challengers first: profile-guided cache/routing and lane-local conversation parking remain inside the independent-lane model; static Super-Lane comes next when single-request underutilization matters; elastic Super-Lane lifecycle is gated on a successful static crossover; cross-lane migration remains later.
 4. Treat upstream peer/expert-tier and load/unload controls as execution/lifecycle primitives to consume, not automatic replacements for independent lanes.
