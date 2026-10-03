@@ -144,6 +144,18 @@ Prototype only if single-request underutilization is a material target bottlenec
 
 Prototype only if host expert misses/traffic remain a dominant steady-state cost after scheduling improvements. Promotion requires reduced misses to outweigh new GPU-to-GPU communication and coordination.
 
+### Profile-guided expert-cache and lane routing
+
+Use upstream learned expert profiles only as an opt-in serving signal. First make profile ownership explicit: ordinary independent lanes must not write the same `--expert-profile-save FILE`; use lane-local profile files or another single-writer aggregation contract before enabling persistence.
+
+Stage the challenger:
+
+- first, measure whether independently learned per-lane expert profiles remain materially different under repeated workload classes and whether those differences improve cache hit rate, H2D traffic, TTFT/E2E latency, or throughput versus one shared/static profile;
+- only if a stable, useful difference exists, expose profile/cache affinity to the scheduler as one bounded new-session placement signal alongside existing health, capability, session-affinity, and load constraints;
+- consider supervisor-side aggregation into a global profile only if it outperforms lane-local profiles or reduces operational complexity without erasing useful specialization.
+
+Do not infer request semantics from profile identity alone and do not introduce learned routing merely because `--expert-profile-save` exists. Promotion requires a held-out end-to-end serving gain after controlling for workload mix, cache warmth, and expert-profile initialization, with a clean fallback to the current profile-agnostic scheduler.
+
 ### Dynamic/shared KV or migration
 
 Keep deferred while every lane can admit the required context and placement/wait/recompute remain sufficient. Reopen only when measured capacity/utilization or overload behavior justifies the ownership, migration, and recovery complexity.
