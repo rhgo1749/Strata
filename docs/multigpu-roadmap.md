@@ -122,14 +122,32 @@ Automatic child-process respawn and persistent cross-run arena reuse are not int
 
 These are evidence-triggered branches, not mandatory phases.
 
+### Decode-assist helper GPU (next execution challenger)
+
+Evaluate upstream Strata's P2P-free secondary expert caches before adding more topology coupling. This challenger keeps one ordinary lane as the owner of dense/attention execution, KV, session state, MTP/draft state, local expert cache, API semantics, and failure recovery. A secondary GPU is used only as an expert worker for decode/MTP through upstream `--expert-cache-device1/2/3` and pinned host staging. Prompt prefill remains on the primary GPU.
+
+This is deliberately distinct from both layer split and the peer tier:
+
+- unlike layer split, it does not partition the model's layer graph or require prompt chunks/tokens to traverse multiple GPUs;
+- unlike `--peer-device`, it does not require a validated P2P path;
+- unlike cross-lane migration, it does not move KV or session ownership;
+- if the helper is absent or not worthwhile, the request remains an ordinary independent-lane request.
+
+The first reference-host experiment is tracked by [#23 — P2P-free decode-assist helper GPU](https://github.com/rhgo1749/Strata-Lanes/issues/23). Test the RTX 5060 Ti as the first helper because it can preserve the 3×RTX 5070 Ti production lane pool, then test a RTX 5070 Ti helper only as an opportunity-cost reference. Use explicit disjoint CPU affinity for all participating processes; a helper process without CPU partitioning can create a false cross-lane slowdown.
+
+Measure the primary-only control against primary+helper with fixed prompt/model/context/KV conditions. Separate cold/no-reuse prompt processing from sufficiently long warm decode, record speculative acceptance, useful secondary-expert work, CPU-pool drain, cache behavior, PCIe traffic where available, power, and failure fallback. Also account for the helper GPU's opportunity cost as an independent lane.
+
+Promotion requires a repeatable end-to-end decode/E2E improvement without a material prompt-path regression, without meaningful degradation of unrelated lanes through host/PCIe contention, and with a clean primary-only fallback. Prefer this lower-coupling mechanism over a Super-Lane when it closes the same single-request gap.
+
 ### Super-Lane execution groups
 
 Treat a Super-Lane as a scheduler-level execution group: one logical lane may own either one GPU or a fixed multi-GPU Strata engine while the rest of the serving control plane continues to route whole requests/sessions between logical lanes.
 
-The first challenger should be deliberately static. On a three-GPU host, compare the production `1+1+1` independent-lane baseline against a `2+1` topology: one two-GPU Super-Lane plus one ordinary lane. Use upstream Strata execution primitives rather than forking model execution:
+Treat static layer split as the higher-coupling challenger after decode assist. On a three-GPU host, compare the production `1+1+1` independent-lane baseline against a `2+1` topology: one two-GPU Super-Lane plus one ordinary lane. Use upstream Strata execution primitives rather than forking model execution:
 
-- use upstream layer split as the first backend where P2P is unavailable or unnecessary;
-- keep upstream peer-device / expert-tier execution as an optional backend for hardware where the required peer path is validated;
+- use upstream layer split as the static backend where P2P is unavailable or unnecessary;
+- keep upstream peer-device execution only for hardware where the required peer path is validated;
+- do not conflate P2P-free `--expert-cache-device1/2/3` decode assist with a Super-Lane; it remains the lower-coupling challenger above;
 - keep session affinity, capabilities, admission, health checks, telemetry, shared-arena ownership, and failure reporting at the logical-lane boundary.
 
 Measure the crossover rather than assuming aggregation wins: single-request TTFT/E2E and prompt/decode throughput, concurrent aggregate goodput, queue/tail latency, context capacity, shared host-memory/PCIe pressure, power, and failure-domain cost.
@@ -221,7 +239,7 @@ Until measurements justify them, this roadmap does **not** assume that Strata sh
 
 1. Keep the completed Phase 1/2 serving-control and Phase 3 lifecycle gates as regression controls on the promoted 0.1.38 software baseline; retain the measured 0.1.30/0.1.31 evidence under its original engine generation.
 2. Do not add another mandatory serving phase without a measured residual.
-3. Evaluate the lowest-coupling challengers first: profile-guided cache/routing and lane-local conversation parking remain inside the independent-lane model; static Super-Lane comes next when single-request underutilization matters; elastic Super-Lane lifecycle is gated on a successful static crossover; cross-lane migration remains later.
-4. Treat upstream peer/expert-tier and load/unload controls as execution/lifecycle primitives to consume, not automatic replacements for independent lanes.
+3. Evaluate the lowest-coupling challengers first: profile-guided cache/routing and lane-local conversation parking remain inside the independent-lane model; **P2P-free decode assist (#23) is the next multi-GPU execution challenger** when single-request decode underutilization matters; static layer-split Super-Lane follows only if helper offload leaves a material gap; elastic Super-Lane lifecycle remains gated on a successful static crossover; cross-lane migration stays later.
+4. Treat upstream helper, peer, layer-split and load/unload controls as distinct execution/lifecycle primitives: helper offload is valid without P2P, peer execution is deferred on hardware without a validated P2P path, and neither automatically replaces independent lanes.
 
 The default bias remains deliberate simplicity: add coupling only when measurements show it buys something.
