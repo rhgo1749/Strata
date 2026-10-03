@@ -136,6 +136,22 @@ Measure the crossover rather than assuming aggregation wins: single-request TTFT
 
 Do **not** begin with dynamic GPU bonding. Reopen bond/unbond policy only if the static `1+1+1` versus `2+1` experiment demonstrates a repeatable workload-dependent crossover large enough to justify topology changes. Any dynamic version must retain a clean independent-lane fallback and must not migrate an active session merely to rebalance GPUs.
 
+### Elastic Super-Lane lifecycle
+
+Treat upstream engine load/unload and lazy-start controls as lifecycle primitives, not as a reason to introduce dynamic GPU bonding early. Evaluate this challenger only after a static Super-Lane demonstrates a repeatable workload-dependent advantage.
+
+The first elastic experiment should use an explicit drain/reconfigure/restore sequence:
+
+- stop admitting new work to the donor lane and wait for its active request to finish;
+- unload or stop that lane without discarding another lane's active session;
+- form the pre-declared Super-Lane topology from the released GPU;
+- run the target workload and record reconfiguration, model-load, queue, TTFT/E2E, throughput, power, and failure-recovery cost;
+- dismantle the Super-Lane and restore the donor ordinary lane before returning it to admission.
+
+Prefer upstream `lazy_load`, `/v1/load`, `/v1/unload`, `idle_unload_s`, `min_free_vram_mib`, and related server lifecycle primitives over adding a fork-specific engine lifecycle.
+
+Do not migrate an active session merely to free a GPU, and do not promote automatic bond/unbond policy unless the static crossover remains large enough after reconfiguration and reload overhead are included. The ordinary independent-lane topology remains the rollback path.
+
 ### Single-process multi-GPU execution
 
 Prototype only if single-request underutilization is a material target bottleneck. Compare single-request latency/throughput, concurrent aggregate throughput, synchronization/interconnect cost, context capacity, power, and failure-domain cost.
@@ -156,9 +172,19 @@ Stage the challenger:
 
 Do not infer request semantics from profile identity alone and do not introduce learned routing merely because `--expert-profile-save` exists. Promotion requires a held-out end-to-end serving gain after controlling for workload mix, cache warmth, and expert-profile initialization, with a clean fallback to the current profile-agnostic scheduler.
 
+### Lane-local conversation parking
+
+Evaluate upstream conversation snapshots as a bounded multi-session capability **inside one ordinary lane** before attempting cross-lane migration. Keep the production default at `--conversation-cache-mib 0` until the scheduler explicitly understands parked-state ownership and the experiment passes its gate.
+
+The first challenger should preserve lane ownership: a session may be parked to host RAM and later restored only by the same lane. Compare the current one-live-session-per-lane baseline against bounded parking under alternating and overloaded `M > N` workloads. Measure host-RAM cost, snapshot save/restore latency, reusable KV/prompt work, queue delay, TTFT/E2E, aggregate goodput, eviction behavior, cancellation/failure recovery, and the cost of falling back to ordinary prompt processing after a miss or eviction.
+
+Do not treat upstream's internal snapshot LRU as an independent placement policy. The Lanes supervisor must remain the authority for session/lane affinity and admission; parking is a lane-local retained-state mechanism underneath that contract. Start with explicit RAM/slot limits and no cross-lane snapshot transfer.
+
+Promotion requires a repeatable end-to-end advantage over wait/recompute with bounded RAM and no regression in affinity, fairness, correctness, or failure isolation.
+
 ### Dynamic/shared KV or migration
 
-Keep deferred while every lane can admit the required context and placement/wait/recompute remain sufficient. Reopen only when measured capacity/utilization or overload behavior justifies the ownership, migration, and recovery complexity.
+Keep cross-lane migration deferred until lane-local conversation parking has been evaluated and every lane can still admit the required context with placement/wait/recompute as a clean fallback. Reopen only when measured capacity/utilization or overload behavior shows that same-lane parking is insufficient and the ownership, transfer, and recovery complexity is justified.
 
 Research tracker: [#20 — cross-lane parked conversation migration](https://github.com/rhgo1749/Strata-Lanes/issues/20). Keep implementation parked while upstream Strata's conversation snapshot/cache/storage-tier interfaces are evolving; prefer consuming upstream state primitives over forking their snapshot format.
 
@@ -195,6 +221,7 @@ Until measurements justify them, this roadmap does **not** assume that Strata sh
 
 1. Keep the completed Phase 1/2 serving-control and Phase 3 lifecycle gates as regression controls on the promoted 0.1.34 software baseline; retain the measured 0.1.30/0.1.31 evidence under its original engine generation.
 2. Do not add another mandatory serving phase without a measured residual.
-3. Run conditional architecture challengers only when their documented trigger fires; upstream peer/expert-tier work is an execution primitive to evaluate separately, not an automatic replacement for independent lanes.
+3. Evaluate the lowest-coupling challengers first: profile-guided cache/routing and lane-local conversation parking remain inside the independent-lane model; static Super-Lane comes next when single-request underutilization matters; elastic Super-Lane lifecycle is gated on a successful static crossover; cross-lane migration remains later.
+4. Treat upstream peer/expert-tier and load/unload controls as execution/lifecycle primitives to consume, not automatic replacements for independent lanes.
 
 The default bias remains deliberate simplicity: add coupling only when measurements show it buys something.
