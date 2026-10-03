@@ -204,6 +204,10 @@ Do not treat upstream's internal snapshot LRU as an independent placement policy
 
 Promotion requires a repeatable end-to-end advantage over wait/recompute with bounded RAM and no regression in affinity, fairness, correctness, or failure isolation.
 
+**Current mechanism status on Strata 0.1.38 / the reference host: passed, but not production-enabled.** A direct ordinary-lane synthetic alternating-session probe showed that a sufficiently sized same-lane cache materially reduces return-turn E2E: with six conversations, six parking slots reduced mean second-turn E2E from about 3.64 s to 2.81 s (~22.7%), with restores averaging about 11.9 ms and the parked cache growing to about 2.0 GiB. The same six-conversation workload with only four slots reached seven evictions and erased the gain, demonstrating that bounded capacity/working-set fit is part of the serving contract rather than a tuning detail.
+
+The Lanes supervisor already remembers multiple stable affinity keys per lane and sends returning sessions back to their remembered lane. The next gate is therefore not cross-lane migration: add an **experimental same-lane parking integration** that keeps strict affinity, exports parked/evicted ownership telemetry, and treats an engine-side miss or eviction as an ordinary recompute fallback. Run a three-lane A/B under alternating `M > N` sessions and include queue/TTFT/E2E/goodput, host RAM, eviction, cancellation/failure and fallback behavior. Keep the production default at `--conversation-cache-mib 0` until this control-plane gate passes.
+
 ### Dynamic/shared KV or migration
 
 Keep cross-lane migration deferred until lane-local conversation parking has been evaluated and every lane can still admit the required context with placement/wait/recompute as a clean fallback. Reopen only when measured capacity/utilization or overload behavior shows that same-lane parking is insufficient and the ownership, transfer, and recovery complexity is justified.
