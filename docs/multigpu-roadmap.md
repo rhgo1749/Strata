@@ -122,6 +122,20 @@ Automatic child-process respawn and persistent cross-run arena reuse are not int
 
 These are evidence-triggered branches, not mandatory phases.
 
+### Super-Lane execution groups
+
+Treat a Super-Lane as a scheduler-level execution group: one logical lane may own either one GPU or a fixed multi-GPU Strata engine while the rest of the serving control plane continues to route whole requests/sessions between logical lanes.
+
+The first challenger should be deliberately static. On a three-GPU host, compare the production `1+1+1` independent-lane baseline against a `2+1` topology: one two-GPU Super-Lane plus one ordinary lane. Use upstream Strata execution primitives rather than forking model execution:
+
+- use upstream layer split as the first backend where P2P is unavailable or unnecessary;
+- keep upstream peer-device / expert-tier execution as an optional backend for hardware where the required peer path is validated;
+- keep session affinity, capabilities, admission, health checks, telemetry, shared-arena ownership, and failure reporting at the logical-lane boundary.
+
+Measure the crossover rather than assuming aggregation wins: single-request TTFT/E2E and prompt/decode throughput, concurrent aggregate goodput, queue/tail latency, context capacity, shared host-memory/PCIe pressure, power, and failure-domain cost.
+
+Do **not** begin with dynamic GPU bonding. Reopen bond/unbond policy only if the static `1+1+1` versus `2+1` experiment demonstrates a repeatable workload-dependent crossover large enough to justify topology changes. Any dynamic version must retain a clean independent-lane fallback and must not migrate an active session merely to rebalance GPUs.
+
 ### Single-process multi-GPU execution
 
 Prototype only if single-request underutilization is a material target bottleneck. Compare single-request latency/throughput, concurrent aggregate throughput, synchronization/interconnect cost, context capacity, power, and failure-domain cost.
