@@ -1,0 +1,165 @@
+{
+  "off": {
+    "turns": {
+      "1": {
+        "n": 4,
+        "e2e_mean_s": 3.54707453275023,
+        "e2e_sd_s": 0.2569490195956114,
+        "decode_tg_mean": 61.2
+      },
+      "2": {
+        "n": 4,
+        "e2e_mean_s": 3.64680082149971,
+        "e2e_sd_s": 0.04709217183639727,
+        "decode_tg_mean": 61.2
+      },
+      "3": {
+        "n": 4,
+        "e2e_mean_s": 3.567267143001118,
+        "e2e_sd_s": 0.3106721765895872,
+        "decode_tg_mean": 61.2
+      }
+    },
+    "resource": {
+      "mem_available_start_mib": 63605.73828125,
+      "mem_available_min_mib": 63256.6484375,
+      "drop_to_min_mib": 349.08984375,
+      "gpu_power_mean_w": 93.14880952380952,
+      "gpu_util_mean_pct": 95.66666666666667
+    }
+  },
+  "on": {
+    "turns": {
+      "1": {
+        "n": 4,
+        "e2e_mean_s": 3.5788328362505126,
+        "e2e_sd_s": 0.23727060677756223,
+        "decode_tg_mean": 61.2
+      },
+      "2": {
+        "n": 4,
+        "e2e_mean_s": 2.7815048165002736,
+        "e2e_sd_s": 0.07219230808858182,
+        "decode_tg_mean": 61.2
+      },
+      "3": {
+        "n": 4,
+        "e2e_mean_s": 2.5022184049994394,
+        "e2e_sd_s": 0.386705033323672,
+        "decode_tg_mean": 61.2
+      }
+    },
+    "resource": {
+      "mem_available_start_mib": 63703.28125,
+      "mem_available_min_mib": 61591.125,
+      "drop_to_min_mib": 2112.15625,
+      "gpu_power_mean_w": 87.62911764705882,
+      "gpu_util_mean_pct": 98.67647058823529
+    },
+    "parking": {
+      "parks": 11,
+      "park_ms_mean": 55.42727272727273,
+      "max_cache_bytes": 1650200680,
+      "max_evictions": 0,
+      "max_snapshot_bytes": 550066980,
+      "max_reused_kv_bytes": 30528000
+    },
+    "restores": {
+      "count": 8,
+      "restore_ms_mean": 12.5625,
+      "live": 7,
+      "checkpoint": 1
+    }
+  },
+  "off6": {
+    "turns": {
+      "1": {
+        "n": 6,
+        "e2e_mean_s": 3.5174990101671333,
+        "e2e_sd_s": 0.22623267903714575,
+        "decode_tg_mean": 61.2
+      },
+      "2": {
+        "n": 6,
+        "e2e_mean_s": 3.642899964166039,
+        "e2e_sd_s": 0.07068221623506188,
+        "decode_tg_mean": 61.2
+      }
+    },
+    "resource": {
+      "mem_available_start_mib": 63660.59765625,
+      "mem_available_min_mib": 63388.90625,
+      "drop_to_min_mib": 271.69140625,
+      "gpu_power_mean_w": 95.75119047619047,
+      "gpu_util_mean_pct": 99.16666666666667
+    }
+  },
+  "on6s4": {
+    "turns": {
+      "1": {
+        "n": 6,
+        "e2e_mean_s": 3.5577417596668965,
+        "e2e_sd_s": 0.21062345854097456,
+        "decode_tg_mean": 61.1
+      },
+      "2": {
+        "n": 6,
+        "e2e_mean_s": 3.6871097766670573,
+        "e2e_sd_s": 0.06410353484135832,
+        "decode_tg_mean": 61.1
+      }
+    },
+    "resource": {
+      "mem_available_start_mib": 63666.421875,
+      "mem_available_min_mib": 62404.59375,
+      "drop_to_min_mib": 1261.828125,
+      "gpu_power_mean_w": 94.08857142857143,
+      "gpu_util_mean_pct": 96.54761904761905
+    },
+    "parking": {
+      "parks": 11,
+      "park_ms_mean": 40.27272727272727,
+      "max_cache_bytes": 1066831656,
+      "max_evictions": 7,
+      "max_snapshot_bytes": 266735372,
+      "max_reused_kv_bytes": 0
+    }
+  },
+  "on6s6": {
+    "turns": {
+      "1": {
+        "n": 6,
+        "e2e_mean_s": 3.551176297166118,
+        "e2e_sd_s": 0.2121530435011018,
+        "decode_tg_mean": 61.3
+      },
+      "2": {
+        "n": 6,
+        "e2e_mean_s": 2.814717771000384,
+        "e2e_sd_s": 0.1189009003996942,
+        "decode_tg_mean": 61.3
+      }
+    },
+    "resource": {
+      "mem_available_start_mib": 63586.8359375,
+      "mem_available_min_mib": 61024.02734375,
+      "drop_to_min_mib": 2562.80859375,
+      "gpu_power_mean_w": 90.07756756756757,
+      "gpu_util_mean_pct": 95.94594594594595
+    },
+    "parking": {
+      "parks": 11,
+      "park_ms_mean": 48.40909090909091,
+      "max_cache_bytes": 2159968392,
+      "max_evictions": 0,
+      "max_snapshot_bytes": 431993680,
+      "max_reused_kv_bytes": 25765632
+    },
+    "restores": {
+      "count": 6,
+      "restore_ms_mean": 11.933333333333334,
+      "live": 5,
+      "checkpoint": 1
+    }
+  }
+}
