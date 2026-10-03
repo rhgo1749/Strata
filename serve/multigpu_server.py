@@ -87,7 +87,9 @@ def remove_flag(args: list[str], name: str) -> list[str]:
     return [arg for arg in args if arg != name]
 
 
-def sanitize_lane_config(cfg: dict, *, allow_profile_persistence: bool = False) -> dict:
+def sanitize_lane_config(cfg: dict, *, allow_profile_persistence: bool = False,
+                         conversation_cache_mib: int = 0, conversation_cache_slots: int | None = None,
+                         conversation_cache_min_free_mib: int | None = None) -> dict:
     """Return a lane-local config that cannot re-expand into an upstream multi-GPU engine."""
     lane_cfg = copy.deepcopy(cfg)
     lane_cfg.pop("gpu", None)
@@ -129,11 +131,15 @@ def sanitize_lane_config(cfg: dict, *, allow_profile_persistence: bool = False) 
             args = remove_option(args, "--expert-profile-save")
             args = remove_option(args, "--expert-profile-save-every")
 
-        # Upstream 0.1.30 can park multiple conversations inside one engine.
-        # The lane scheduler does not yet advertise or route against parked
-        # snapshot ownership, so keep one live conversation state per lane
-        # until that cross-layer contract is implemented explicitly.
-        args = replace_option(args, "--conversation-cache-mib", 0)
+        # Production remains parking-off.  Experimental supervisor gates may
+        # opt into bounded same-lane parking while strict affinity keeps each
+        # conversation owned by the lane that first received it.  An engine
+        # cache miss/eviction remains a normal prompt-recompute fallback.
+        args = replace_option(args, "--conversation-cache-mib", max(0, conversation_cache_mib))
+        if conversation_cache_slots is not None:
+            args = replace_option(args, "--conversation-cache-slots", conversation_cache_slots)
+        if conversation_cache_min_free_mib is not None:
+            args = replace_option(args, "--conversation-cache-min-free-mib", conversation_cache_min_free_mib)
         lane_cfg["args"] = args
     return lane_cfg
 
@@ -1437,6 +1443,12 @@ def main() -> int:
                     help="benchmark only: append exact lane lease timing records as JSONL")
     ap.add_argument("--bench-console-summary", action="store_true",
                     help="print concise per-request benchmark summaries to stdout without persistent trace storage")
+    ap.add_argument("--experimental-conversation-cache-mib", type=int, default=0,
+                    help="experiment only: per-lane host-RAM MiB budget for same-lane conversation parking")
+    ap.add_argument("--experimental-conversation-cache-slots", type=int, default=4,
+                    help="experiment only: per-lane parked-conversation slot cap (default: 4)")
+    ap.add_argument("--experimental-conversation-cache-min-free-mib", type=int, default=8192,
+                    help="experiment only: host MemAvailable floor before parking (default: 8192)")
     ap.add_argument(
         "--bench-scheduler-policy",
         choices=SCHEDULER_POLICIES,
@@ -1451,6 +1463,8 @@ def main() -> int:
 
     if a.bench_scheduler_policy not in SCHEDULER_POLICIES_WITHOUT_TRACE and not a.bench_trace_jsonl:
         ap.error("experimental --bench-scheduler-policy requires --bench-trace-jsonl")
+    if a.experimental_conversation_cache_mib < 0 or a.experimental_conversation_cache_slots < 1 or a.experimental_conversation_cache_min_free_mib < 0:
+        ap.error("experimental conversation-cache values must be non-negative and slots must be positive")
     if os.name == "nt":
         ap.error("the shared expert arena v1 is Linux-only")
     config = Path(a.config).expanduser().resolve()
@@ -1557,7 +1571,13 @@ def main() -> int:
     lanes: list[Lane] = []
     for i, (gpu, ctx) in enumerate(zip(gpus, contexts)):
         lane_cfg = bind_lane_gpu(
-            sanitize_lane_config(cfg, allow_profile_persistence=(len(gpus) == 1)),
+            sanitize_lane_config(
+                cfg,
+                allow_profile_persistence=(len(gpus) == 1),
+                conversation_cache_mib=a.experimental_conversation_cache_mib,
+                conversation_cache_slots=a.experimental_conversation_cache_slots,
+                conversation_cache_min_free_mib=a.experimental_conversation_cache_min_free_mib,
+            ),
             gpu,
         )
         lane_vision = i in vision_lanes
@@ -1609,6 +1629,7 @@ def main() -> int:
             "kv_budget": a.kv_budget,
             "scheduler_policy": a.bench_scheduler_policy,
             "scheduler_policy_scope": "new_session_idle_lane_only",
+            "conversation_parking": {"mib_per_lane": a.experimental_conversation_cache_mib, "slots_per_lane": a.experimental_conversation_cache_slots, "min_free_mib": a.experimental_conversation_cache_min_free_mib},
             "public_host": a.host,
             "public_port": a.port,
             "base_port": a.base_port,
@@ -1654,6 +1675,8 @@ def main() -> int:
             ", ".join(f"lane {x.index}={x.kv_resident}" for x in lanes if x.kv_resident is not None),
             flush=True,
         )
+    if a.experimental_conversation_cache_mib:
+        print(f"[strata-multigpu] EXPERIMENTAL same-lane conversation parking: {a.experimental_conversation_cache_mib} MiB/lane, {a.experimental_conversation_cache_slots} slots/lane, min-free {a.experimental_conversation_cache_min_free_mib} MiB", flush=True)
     if any(x.vram_reserve_mib is not None for x in lanes):
         print(
             "[strata-multigpu] VRAM reserve MiB: " +

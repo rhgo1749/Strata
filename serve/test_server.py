@@ -994,6 +994,12 @@ class CancelledRead(unittest.TestCase):
     """#471: a request cancelled while its prompt was read is recorded with the tokens the engine read (the DONE
     line's 15th field), not the whole prompt; an older engine's line (no such field) keeps the whole prompt."""
 
+    def test_parse_done_parking_fields(self):
+        e = object.__new__(StrataEngine)
+        StrataEngine._parse_done(e, "DONE 1 20 40.0 30.0 stop 3 5 7 9 10 11 12 13.0 14 4 123456789 2")
+        self.assertEqual((e.last["parked_conversations"], e.last["parked_bytes"], e.last["park_evictions"]),
+                         (4, 123456789, 2))
+
     def test_parse_done_read_field(self):
         e = SimpleNamespace()
         StrataEngine._parse_done(e, "DONE 0 98179 17565.0 0.0 cancel 0 0 0 0 0 0 0 0.0 12288")

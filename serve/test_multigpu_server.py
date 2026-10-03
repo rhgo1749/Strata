@@ -139,6 +139,14 @@ class MultiGpuPlanningTests(unittest.TestCase):
         self.assertEqual(M.option_value(got["args"], "--conversation-cache-mib"), "0")
         self.assertEqual(M.option_value(got["args"], "--conversation-cache-slots"), "4")
 
+    def test_lane_config_can_enable_experimental_same_lane_parking(self):
+        cfg = {"args": ["--pack", "/m", "--conversation-cache-mib", "0"]}
+        got = M.sanitize_lane_config(cfg, conversation_cache_mib=4096,
+                                     conversation_cache_slots=4, conversation_cache_min_free_mib=8192)
+        self.assertEqual(M.option_value(got["args"], "--conversation-cache-mib"), "4096")
+        self.assertEqual(M.option_value(got["args"], "--conversation-cache-slots"), "4")
+        self.assertEqual(M.option_value(got["args"], "--conversation-cache-min-free-mib"), "8192")
+
     def test_nonvision_lane_drops_encoder_and_vram_reserve(self):
         cfg = {"vision": {"exe": "/v", "gpu": True},
                "args": ["--pack", "/m", "--vision", "--vram-reserve-mib", "700", "--max-context", "262144"]}

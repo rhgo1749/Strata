@@ -1,0 +1,365 @@
+{
+  "arm": "on",
+  "bench_start_epoch": 1791030604.6584976,
+  "scenarios": {
+    "4": {
+      "turns": [
+        {
+          "turn": 1,
+          "wall_s": 7.1285537850017135,
+          "aggregate_completion_tps": 53.867868796603,
+          "rows": [
+            {
+              "sid": "on-n4-s0",
+              "client_s": 4.120020041002135,
+              "queue_ms": 2.502,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "on-n4-s1",
+              "client_s": 3.9752492039988283,
+              "queue_ms": 8.415,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "on-n4-s2",
+              "client_s": 7.126598707000085,
+              "queue_ms": 3971.204,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "on-n4-s3",
+              "client_s": 5.432506109002134,
+              "queue_ms": 3.539,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            }
+          ]
+        },
+        {
+          "turn": 2,
+          "wall_s": 4.380280587000016,
+          "aggregate_completion_tps": 81.50162824261074,
+          "rows": [
+            {
+              "sid": "on-n4-s0",
+              "client_s": 2.6495272339998337,
+              "queue_ms": 1.571,
+              "lane": null,
+              "prompt_tokens": 1456,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "on-n4-s1",
+              "client_s": 2.079341774002387,
+              "queue_ms": 2.614,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 69
+            },
+            {
+              "sid": "on-n4-s2",
+              "client_s": 4.379651332001231,
+              "queue_ms": 2080.999,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "on-n4-s3",
+              "client_s": 3.211272844000632,
+              "queue_ms": 6.723,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            }
+          ]
+        }
+      ]
+    },
+    "6": {
+      "turns": [
+        {
+          "turn": 1,
+          "wall_s": 9.971165801001916,
+          "aggregate_completion_tps": 57.76656526382529,
+          "rows": [
+            {
+              "sid": "on-n6-s0",
+              "client_s": 5.09223475300314,
+              "queue_ms": 2.891,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "on-n6-s1",
+              "client_s": 3.4431902290016296,
+              "queue_ms": 1.951,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "on-n6-s2",
+              "client_s": 6.93474535399946,
+              "queue_ms": 3444.321,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "on-n6-s3",
+              "client_s": 3.526508773000387,
+              "queue_ms": 6.819,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "on-n6-s4",
+              "client_s": 7.071755048997147,
+              "queue_ms": 3529.54,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "on-n6-s5",
+              "client_s": 9.96981717699964,
+              "queue_ms": 5093.075,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            }
+          ]
+        },
+        {
+          "turn": 2,
+          "wall_s": 5.683369987000333,
+          "aggregate_completion_tps": 91.84691498072083,
+          "rows": [
+            {
+              "sid": "on-n6-s0",
+              "client_s": 5.682741430999158,
+              "queue_ms": 2805.02,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "on-n6-s1",
+              "client_s": 2.069561149997753,
+              "queue_ms": 1.975,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 69
+            },
+            {
+              "sid": "on-n6-s2",
+              "client_s": 3.995922916001291,
+              "queue_ms": 2071.846,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 69
+            },
+            {
+              "sid": "on-n6-s3",
+              "client_s": 4.607956471001671,
+              "queue_ms": 2253.665,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "on-n6-s4",
+              "client_s": 2.251537004001875,
+              "queue_ms": 2.823,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "on-n6-s5",
+              "client_s": 2.8045281420018,
+              "queue_ms": 6.39,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            }
+          ]
+        }
+      ]
+    },
+    "9": {
+      "turns": [
+        {
+          "turn": 1,
+          "wall_s": 14.85415858199849,
+          "aggregate_completion_tps": 58.16552955393026,
+          "rows": [
+            {
+              "sid": "on-n9-s0",
+              "client_s": 3.5741501099982997,
+              "queue_ms": 2.082,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "on-n9-s1",
+              "client_s": 4.99960477499917,
+              "queue_ms": 2.852,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "on-n9-s2",
+              "client_s": 7.197773062001943,
+              "queue_ms": 3578.181,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "on-n9-s3",
+              "client_s": 3.35012541299875,
+              "queue_ms": 6.698,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "on-n9-s4",
+              "client_s": 6.90566007400048,
+              "queue_ms": 3351.677,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "on-n9-s5",
+              "client_s": 9.969648670001334,
+              "queue_ms": 5000.111,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "on-n9-s6",
+              "client_s": 10.668020388999139,
+              "queue_ms": 7198.534,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "on-n9-s7",
+              "client_s": 10.26120428500144,
+              "queue_ms": 6907.182,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "on-n9-s8",
+              "client_s": 14.852199503999145,
+              "queue_ms": 9970.149,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            }
+          ]
+        },
+        {
+          "turn": 2,
+          "wall_s": 8.856116850001854,
+          "aggregate_completion_tps": 94.962613326384,
+          "rows": [
+            {
+              "sid": "on-n9-s0",
+              "client_s": 2.1733925999978965,
+              "queue_ms": 2.257,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "on-n9-s1",
+              "client_s": 3.154850902999897,
+              "queue_ms": 3.055,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "on-n9-s2",
+              "client_s": 4.632355873000051,
+              "queue_ms": 2175.151,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "on-n9-s3",
+              "client_s": 7.274509620998288,
+              "queue_ms": 4851.875,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "on-n9-s4",
+              "client_s": 2.5139584569988074,
+              "queue_ms": 6.381,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "on-n9-s5",
+              "client_s": 8.854194494000694,
+              "queue_ms": 5896.706,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "on-n9-s6",
+              "client_s": 7.176126419999491,
+              "queue_ms": 4632.438,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "on-n9-s7",
+              "client_s": 4.847758574000181,
+              "queue_ms": 2516.886,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "on-n9-s8",
+              "client_s": 5.895479143997363,
+              "queue_ms": 3154.599,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 73
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "bench_end_epoch": 1791030655.5322511
+}
