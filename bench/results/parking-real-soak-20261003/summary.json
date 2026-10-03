@@ -1,0 +1,107 @@
+{
+  "1": {
+    "off": {
+      "wall_s": 36.18516712700148,
+      "e2e_mean_s": 33.18539339766661,
+      "completion_tokens": 576,
+      "aggregate_completion_tps": 15.918124627651288,
+      "cached": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "on": {
+      "wall_s": 36.222826355002326,
+      "e2e_mean_s": 33.22819588233384,
+      "completion_tokens": 576,
+      "aggregate_completion_tps": 15.90157527617817,
+      "cached": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "delta": {
+      "wall_pct": 0.10407366053795108,
+      "e2e_pct": 0.12897989231082096,
+      "aggregate_tps_pct": -0.10396545987817474
+    }
+  },
+  "2": {
+    "off": {
+      "wall_s": 9.685872572001244,
+      "e2e_mean_s": 6.063261362332317,
+      "completion_tokens": 576,
+      "aggregate_completion_tps": 59.468054707330296,
+      "cached": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "on": {
+      "wall_s": 6.231744727996556,
+      "e2e_mean_s": 4.333192865833553,
+      "completion_tokens": 576,
+      "aggregate_completion_tps": 92.42997348917055,
+      "cached": [
+        968,
+        964,
+        967,
+        1064,
+        1062,
+        1062
+      ]
+    },
+    "delta": {
+      "wall_pct": -35.66150409607355,
+      "e2e_pct": -28.533628902206342,
+      "aggregate_tps_pct": 55.4279418488818
+    }
+  },
+  "3": {
+    "off": {
+      "wall_s": 9.688483607998933,
+      "e2e_mean_s": 5.507506704165887,
+      "completion_tokens": 495,
+      "aggregate_completion_tps": 51.09158667423681,
+      "cached": [
+        0,
+        0,
+        0,
+        0,
+        1305,
+        0
+      ]
+    },
+    "on": {
+      "wall_s": 6.570858442999452,
+      "e2e_mean_s": 4.091045392333399,
+      "completion_tokens": 534,
+      "aggregate_completion_tps": 81.2679202622178,
+      "cached": [
+        1315,
+        1313,
+        1312,
+        1308,
+        1305,
+        1307
+      ]
+    },
+    "delta": {
+      "wall_pct": -32.178669966737935,
+      "e2e_pct": -25.71873967508881,
+      "aggregate_tps_pct": 59.06321481144676
+    }
+  }
+}

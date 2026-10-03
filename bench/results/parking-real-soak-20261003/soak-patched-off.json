@@ -1,0 +1,204 @@
+{
+  "start": 1791035950.402879,
+  "turns": [
+    {
+      "turn": 1,
+      "wall_s": 36.18516712700148,
+      "rows": [
+        {
+          "sid": "real-soak-code",
+          "turn": 1,
+          "e2e_s": 32.104026044999046,
+          "queue_ms": NaN,
+          "lane": -1,
+          "prompt_tokens": 975,
+          "cached": 0,
+          "completion_tokens": 96
+        },
+        {
+          "sid": "real-soak-research",
+          "turn": 1,
+          "e2e_s": 31.13488786200105,
+          "queue_ms": NaN,
+          "lane": -1,
+          "prompt_tokens": 971,
+          "cached": 0,
+          "completion_tokens": 96
+        },
+        {
+          "sid": "real-soak-ops",
+          "turn": 1,
+          "e2e_s": 31.10420073700152,
+          "queue_ms": NaN,
+          "lane": -1,
+          "prompt_tokens": 974,
+          "cached": 0,
+          "completion_tokens": 96
+        },
+        {
+          "sid": "real-soak-design",
+          "turn": 1,
+          "e2e_s": 34.21990302300037,
+          "queue_ms": NaN,
+          "lane": -1,
+          "prompt_tokens": 968,
+          "cached": 0,
+          "completion_tokens": 96
+        },
+        {
+          "sid": "real-soak-debug",
+          "turn": 1,
+          "e2e_s": 34.36667370299983,
+          "queue_ms": NaN,
+          "lane": -1,
+          "prompt_tokens": 966,
+          "cached": 0,
+          "completion_tokens": 96
+        },
+        {
+          "sid": "real-soak-planner",
+          "turn": 1,
+          "e2e_s": 36.18266901599782,
+          "queue_ms": NaN,
+          "lane": -1,
+          "prompt_tokens": 966,
+          "cached": 0,
+          "completion_tokens": 96
+        }
+      ]
+    },
+    {
+      "turn": 2,
+      "wall_s": 9.685872572001244,
+      "rows": [
+        {
+          "sid": "real-soak-code",
+          "turn": 2,
+          "e2e_s": 4.910163892996934,
+          "queue_ms": NaN,
+          "lane": -1,
+          "prompt_tokens": 1220,
+          "cached": 0,
+          "completion_tokens": 96
+        },
+        {
+          "sid": "real-soak-research",
+          "turn": 2,
+          "e2e_s": 3.5629478359987843,
+          "queue_ms": NaN,
+          "lane": -1,
+          "prompt_tokens": 1217,
+          "cached": 0,
+          "completion_tokens": 96
+        },
+        {
+          "sid": "real-soak-ops",
+          "turn": 2,
+          "e2e_s": 3.7186688059991866,
+          "queue_ms": NaN,
+          "lane": -1,
+          "prompt_tokens": 1216,
+          "cached": 0,
+          "completion_tokens": 96
+        },
+        {
+          "sid": "real-soak-design",
+          "turn": 2,
+          "e2e_s": 7.137312661998294,
+          "queue_ms": NaN,
+          "lane": -1,
+          "prompt_tokens": 1213,
+          "cached": 0,
+          "completion_tokens": 96
+        },
+        {
+          "sid": "real-soak-debug",
+          "turn": 2,
+          "e2e_s": 7.366167846997996,
+          "queue_ms": NaN,
+          "lane": -1,
+          "prompt_tokens": 1210,
+          "cached": 0,
+          "completion_tokens": 96
+        },
+        {
+          "sid": "real-soak-planner",
+          "turn": 2,
+          "e2e_s": 9.684307130002708,
+          "queue_ms": NaN,
+          "lane": -1,
+          "prompt_tokens": 1211,
+          "cached": 0,
+          "completion_tokens": 96
+        }
+      ]
+    },
+    {
+      "turn": 3,
+      "wall_s": 9.688483607998933,
+      "rows": [
+        {
+          "sid": "real-soak-code",
+          "turn": 3,
+          "e2e_s": 5.101212055997166,
+          "queue_ms": NaN,
+          "lane": -1,
+          "prompt_tokens": 1527,
+          "cached": 0,
+          "completion_tokens": 96
+        },
+        {
+          "sid": "real-soak-research",
+          "turn": 3,
+          "e2e_s": 3.5048242650009342,
+          "queue_ms": NaN,
+          "lane": -1,
+          "prompt_tokens": 1524,
+          "cached": 0,
+          "completion_tokens": 85
+        },
+        {
+          "sid": "real-soak-ops",
+          "turn": 3,
+          "e2e_s": 6.2705295699997805,
+          "queue_ms": NaN,
+          "lane": -1,
+          "prompt_tokens": 1519,
+          "cached": 0,
+          "completion_tokens": 82
+        },
+        {
+          "sid": "real-soak-design",
+          "turn": 3,
+          "e2e_s": 6.019408137999562,
+          "queue_ms": NaN,
+          "lane": -1,
+          "prompt_tokens": 1519,
+          "cached": 0,
+          "completion_tokens": 41
+        },
+        {
+          "sid": "real-soak-debug",
+          "turn": 3,
+          "e2e_s": 2.4621807129988156,
+          "queue_ms": NaN,
+          "lane": -1,
+          "prompt_tokens": 1515,
+          "cached": 1305,
+          "completion_tokens": 96
+        },
+        {
+          "sid": "real-soak-planner",
+          "turn": 3,
+          "e2e_s": 9.68688548299906,
+          "queue_ms": NaN,
+          "lane": -1,
+          "prompt_tokens": 1517,
+          "cached": 0,
+          "completion_tokens": 95
+        }
+      ]
+    }
+  ],
+  "end": 1791036010.9628572
+}
