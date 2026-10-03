@@ -1082,6 +1082,42 @@ class MultiGpuPlanningTests(unittest.TestCase):
         self.assertEqual(got.index, 1)
         pool.release(got, affinity_key="new-chat")
 
+    def test_new_session_does_not_erase_affinity_owned_by_live_wrapper_with_dead_child(self):
+        lanes = [
+            M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess()),
+            M.Lane(1, "1", 19087, 262144, Path("lane1.json"), process=_AliveProcess()),
+        ]
+        pool = M.LanePool(lanes)
+        pool.affinity["returning"] = 0
+        old_alive = M.lane_engine_alive
+        M.lane_engine_alive = lambda lane: lane.index == 1
+        try:
+            got = pool.acquire(affinity_key="new-session")
+        finally:
+            M.lane_engine_alive = old_alive
+        self.assertEqual(got.index, 1)
+        pool.release(got, affinity_key="new-session")
+        self.assertEqual(pool.affinity.get("returning"), 0)
+
+    def test_returning_affinity_can_select_wrapper_ready_child_dead_lane_for_restart(self):
+        lanes = [
+            M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess()),
+            M.Lane(1, "1", 19087, 262144, Path("lane1.json"), process=_AliveProcess()),
+        ]
+        pool = M.LanePool(lanes)
+        pool.affinity["returning"] = 0
+        old_alive, old_ready = M.lane_engine_alive, M.lane_service_ready
+        M.lane_engine_alive = lambda lane: lane.index == 1
+        M.lane_service_ready = lambda lane: lane.index == 0
+        decision = {}
+        try:
+            got = pool.acquire(affinity_key="returning", decision_out=decision)
+        finally:
+            M.lane_engine_alive, M.lane_service_ready = old_alive, old_ready
+        self.assertEqual(got.index, 0)
+        self.assertEqual(decision["selected_reason"], "session_affinity_restart")
+        pool.release(got, affinity_key="returning")
+
     def test_native_arena_size_matches_arena_expert_source_contract(self):
         with tempfile.TemporaryDirectory() as td:
             p = Path(td)

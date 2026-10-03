@@ -855,12 +855,30 @@ class LanePool:
             try:
                 while True:
                     alive = [x for x in self.lanes if lane_engine_alive(x)]
-                    if not alive:
+                    # New sessions use only loaded engines. A returning affinity may preserve its
+                    # lane while the private wrapper is alive so that forwarding the request can
+                    # trigger server.py's synchronous child-engine restart path.
+                    restarting_affinity_lane = None
+                    if affinity_key is not None and affinity_key in self.affinity:
+                        candidate = self.lanes[self.affinity[affinity_key]]
+                        if candidate not in alive and lane_service_ready(candidate):
+                            restarting_affinity_lane = candidate
+                    if not alive and restarting_affinity_lane is None:
                         raise RuntimeError("all GPU lanes have stopped")
-                    alive_indices = {x.index for x in alive}
-                    self._drop_dead_affinity(alive_indices)
+                    # Affinity belongs to the lane wrapper/control plane, not to one child-engine
+                    # process. Preserve it across a child crash so the returning session can trigger
+                    # same-lane restart; purge only when the lane wrapper itself is gone.
+                    wrapper_indices = {
+                        x.index for x in self.lanes
+                        if x.process is not None and x.process.poll() is None
+                    }
+                    self._drop_dead_affinity(wrapper_indices)
                     eligible = [x for x in alive if not requires_vision or x.vision]
-                    if not eligible:
+                    restarting_eligible = (
+                        restarting_affinity_lane is not None
+                        and (not requires_vision or restarting_affinity_lane.vision)
+                    )
+                    if not eligible and not restarting_eligible:
                         raise RuntimeError("no vision-capable GPU lanes are running")
 
                     if affinity_key is not None and affinity_key in self.affinity:
@@ -891,11 +909,13 @@ class LanePool:
                             self.affinity.move_to_end(affinity_key)
                             session_turn = self._advance_session_turn(affinity_key)
                             if decision_out is not None:
+                                decision_alive = alive if preferred in alive else [*alive, preferred]
+                                decision_eligible = eligible if preferred in eligible else [*eligible, preferred]
                                 decision_out.update(self._decision_record(
-                                    alive=alive,
-                                    eligible=eligible,
+                                    alive=decision_alive,
+                                    eligible=decision_eligible,
                                     selected=preferred,
-                                    selected_reason="session_affinity",
+                                    selected_reason="session_affinity_restart" if preferred not in alive else "session_affinity",
                                     request_bytes=request_bytes,
                                     prompt_signature=prompt_signature,
                                     session_turn=session_turn,
@@ -1345,12 +1365,14 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                 return self._json(503, {"error": {"message": str(e)}})
             try:
                 if not lane_engine_alive(lane):
-                    proxy_observation = ProxyObservation(
-                        status=503,
-                        completion_reason="lane_unavailable",
-                        error=f"GPU lane {lane.index} is not running",
-                    )
-                    return self._json(503, {"error": {"message": proxy_observation.error}})
+                    restart_affinity = leased and decision.get("selected_reason") == "session_affinity_restart"
+                    if not (restart_affinity and lane_service_ready(lane)):
+                        proxy_observation = ProxyObservation(
+                            status=503,
+                            completion_reason="lane_unavailable",
+                            error=f"GPU lane {lane.index} is not running",
+                        )
+                        return self._json(503, {"error": {"message": proxy_observation.error}})
                 extra_headers = None
                 if leased:
                     extra_headers = {
