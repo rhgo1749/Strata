@@ -854,7 +854,7 @@ class LanePool:
                 self.vision_waiters += 1
             try:
                 while True:
-                    alive = [x for x in self.lanes if lane_service_ready(x)]
+                    alive = [x for x in self.lanes if lane_engine_alive(x)]
                     if not alive:
                         raise RuntimeError("all GPU lanes have stopped")
                     alive_indices = {x.index for x in alive}
