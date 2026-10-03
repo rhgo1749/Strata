@@ -87,7 +87,9 @@ def remove_flag(args: list[str], name: str) -> list[str]:
     return [arg for arg in args if arg != name]
 
 
-def sanitize_lane_config(cfg: dict, *, allow_profile_persistence: bool = False) -> dict:
+def sanitize_lane_config(cfg: dict, *, allow_profile_persistence: bool = False,
+                         conversation_cache_mib: int = 0, conversation_cache_slots: int | None = None,
+                         conversation_cache_min_free_mib: int | None = None) -> dict:
     """Return a lane-local config that cannot re-expand into an upstream multi-GPU engine."""
     lane_cfg = copy.deepcopy(cfg)
     lane_cfg.pop("gpu", None)
@@ -129,11 +131,15 @@ def sanitize_lane_config(cfg: dict, *, allow_profile_persistence: bool = False) 
             args = remove_option(args, "--expert-profile-save")
             args = remove_option(args, "--expert-profile-save-every")
 
-        # Upstream 0.1.30 can park multiple conversations inside one engine.
-        # The lane scheduler does not yet advertise or route against parked
-        # snapshot ownership, so keep one live conversation state per lane
-        # until that cross-layer contract is implemented explicitly.
-        args = replace_option(args, "--conversation-cache-mib", 0)
+        # Production remains parking-off.  Experimental supervisor gates may
+        # opt into bounded same-lane parking while strict affinity keeps each
+        # conversation owned by the lane that first received it.  An engine
+        # cache miss/eviction remains a normal prompt-recompute fallback.
+        args = replace_option(args, "--conversation-cache-mib", max(0, conversation_cache_mib))
+        if conversation_cache_slots is not None:
+            args = replace_option(args, "--conversation-cache-slots", conversation_cache_slots)
+        if conversation_cache_min_free_mib is not None:
+            args = replace_option(args, "--conversation-cache-min-free-mib", conversation_cache_min_free_mib)
         lane_cfg["args"] = args
     return lane_cfg
 
@@ -577,6 +583,17 @@ def benchmark_console_summary(record: dict) -> str:
     )
 
 
+def lane_service_ready(lane: Lane, timeout: float = 0.2) -> bool:
+    """Return whether the lane wrapper is healthy enough to accept a request."""
+    if lane.process is None or lane.process.poll() is not None:
+        return False
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{lane.port}/health", timeout=timeout) as r:
+            return 200 <= r.status < 300
+    except Exception:
+        return False
+
+
 def lane_engine_alive(lane: Lane, timeout: float = 0.2) -> bool:
     """Return whether both the lane wrapper and its child engine currently expose the model."""
     if lane.process is None or lane.process.poll() is not None:
@@ -838,12 +855,30 @@ class LanePool:
             try:
                 while True:
                     alive = [x for x in self.lanes if lane_engine_alive(x)]
-                    if not alive:
+                    # New sessions use only loaded engines. A returning affinity may preserve its
+                    # lane while the private wrapper is alive so that forwarding the request can
+                    # trigger server.py's synchronous child-engine restart path.
+                    restarting_affinity_lane = None
+                    if affinity_key is not None and affinity_key in self.affinity:
+                        candidate = self.lanes[self.affinity[affinity_key]]
+                        if candidate not in alive and lane_service_ready(candidate):
+                            restarting_affinity_lane = candidate
+                    if not alive and restarting_affinity_lane is None:
                         raise RuntimeError("all GPU lanes have stopped")
-                    alive_indices = {x.index for x in alive}
-                    self._drop_dead_affinity(alive_indices)
+                    # Affinity belongs to the lane wrapper/control plane, not to one child-engine
+                    # process. Preserve it across a child crash so the returning session can trigger
+                    # same-lane restart; purge only when the lane wrapper itself is gone.
+                    wrapper_indices = {
+                        x.index for x in self.lanes
+                        if x.process is not None and x.process.poll() is None
+                    }
+                    self._drop_dead_affinity(wrapper_indices)
                     eligible = [x for x in alive if not requires_vision or x.vision]
-                    if not eligible:
+                    restarting_eligible = (
+                        restarting_affinity_lane is not None
+                        and (not requires_vision or restarting_affinity_lane.vision)
+                    )
+                    if not eligible and not restarting_eligible:
                         raise RuntimeError("no vision-capable GPU lanes are running")
 
                     if affinity_key is not None and affinity_key in self.affinity:
@@ -874,11 +909,13 @@ class LanePool:
                             self.affinity.move_to_end(affinity_key)
                             session_turn = self._advance_session_turn(affinity_key)
                             if decision_out is not None:
+                                decision_alive = alive if preferred in alive else [*alive, preferred]
+                                decision_eligible = eligible if preferred in eligible else [*eligible, preferred]
                                 decision_out.update(self._decision_record(
-                                    alive=alive,
-                                    eligible=eligible,
+                                    alive=decision_alive,
+                                    eligible=decision_eligible,
                                     selected=preferred,
-                                    selected_reason="session_affinity",
+                                    selected_reason="session_affinity_restart" if preferred not in alive else "session_affinity",
                                     request_bytes=request_bytes,
                                     prompt_signature=prompt_signature,
                                     session_turn=session_turn,
@@ -995,6 +1032,7 @@ class LanePool:
                     "pid": x.process.pid if x.process else None,
                     "wrapper_alive": bool(x.process and x.process.poll() is None),
                     "alive": lane_engine_alive(x),
+                    "routable": lane_service_ready(x),
                     "busy": x.busy,
                     "affinity_sessions": sum(1 for lane_index in self.affinity.values() if lane_index == x.index),
                     "affinity_waiters": self.affinity_waiters.get(x.index, 0),
@@ -1052,6 +1090,24 @@ def require_ports_free(host: str, ports: list[int]) -> None:
                 raise RuntimeError(f"port {host}:{port} is already in use")
         finally:
             s.close()
+
+
+def lane_parking_status(lane: Lane, timeout: float = 0.25) -> dict:
+    """Best-effort engine-truth parking counters from the lane's latest completed request."""
+    if not lane_engine_alive(lane):
+        return {"parked_conversations": None, "parked_bytes": None, "park_evictions": None}
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{lane.port}/metrics", timeout=timeout) as r:
+            payload = json.loads(r.read())
+        rows = payload.get("requests") or []
+        latest = rows[0] if rows else {}
+        return {
+            "parked_conversations": latest.get("parked_conversations"),
+            "parked_bytes": latest.get("parked_bytes"),
+            "park_evictions": latest.get("park_evictions"),
+        }
+    except Exception:
+        return {"parked_conversations": None, "parked_bytes": None, "park_evictions": None}
 
 
 def wait_ready(lane: Lane, timeout: float) -> None:
@@ -1132,6 +1188,10 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                 self.wfile.write(body)
 
         def _status(self):
+            lanes = pool.status()
+            parking = {lane.index: lane_parking_status(lane) for lane in pool.lanes}
+            for row in lanes:
+                row.update(parking.get(row["index"], {}))
             self._json(200, {
                 "status": "ok",
                 "mode": "partitioned-multigpu-v1",
@@ -1144,7 +1204,7 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                 "bench_trace_jsonl": str(bench_trace.path) if bench_trace else None,
                 "bench_console_summary": bench_console_summary,
                 "scheduler_policy": pool.scheduler_policy,
-                "lanes": pool.status(),
+                "lanes": lanes,
             })
 
         def _slots(self):
@@ -1305,12 +1365,14 @@ def make_handler(pool: LanePool, lane0: Lane, arena_file: Path, arena_bytes: int
                 return self._json(503, {"error": {"message": str(e)}})
             try:
                 if not lane_engine_alive(lane):
-                    proxy_observation = ProxyObservation(
-                        status=503,
-                        completion_reason="lane_unavailable",
-                        error=f"GPU lane {lane.index} is not running",
-                    )
-                    return self._json(503, {"error": {"message": proxy_observation.error}})
+                    restart_affinity = leased and decision.get("selected_reason") == "session_affinity_restart"
+                    if not (restart_affinity and lane_service_ready(lane)):
+                        proxy_observation = ProxyObservation(
+                            status=503,
+                            completion_reason="lane_unavailable",
+                            error=f"GPU lane {lane.index} is not running",
+                        )
+                        return self._json(503, {"error": {"message": proxy_observation.error}})
                 extra_headers = None
                 if leased:
                     extra_headers = {
@@ -1437,6 +1499,12 @@ def main() -> int:
                     help="benchmark only: append exact lane lease timing records as JSONL")
     ap.add_argument("--bench-console-summary", action="store_true",
                     help="print concise per-request benchmark summaries to stdout without persistent trace storage")
+    ap.add_argument("--experimental-conversation-cache-mib", type=int, default=0,
+                    help="experiment only: per-lane host-RAM MiB budget for same-lane conversation parking")
+    ap.add_argument("--experimental-conversation-cache-slots", type=int, default=4,
+                    help="experiment only: per-lane parked-conversation slot cap (default: 4)")
+    ap.add_argument("--experimental-conversation-cache-min-free-mib", type=int, default=8192,
+                    help="experiment only: host MemAvailable floor before parking (default: 8192)")
     ap.add_argument(
         "--bench-scheduler-policy",
         choices=SCHEDULER_POLICIES,
@@ -1451,6 +1519,8 @@ def main() -> int:
 
     if a.bench_scheduler_policy not in SCHEDULER_POLICIES_WITHOUT_TRACE and not a.bench_trace_jsonl:
         ap.error("experimental --bench-scheduler-policy requires --bench-trace-jsonl")
+    if a.experimental_conversation_cache_mib < 0 or a.experimental_conversation_cache_slots < 1 or a.experimental_conversation_cache_min_free_mib < 0:
+        ap.error("experimental conversation-cache values must be non-negative and slots must be positive")
     if os.name == "nt":
         ap.error("the shared expert arena v1 is Linux-only")
     config = Path(a.config).expanduser().resolve()
@@ -1557,7 +1627,13 @@ def main() -> int:
     lanes: list[Lane] = []
     for i, (gpu, ctx) in enumerate(zip(gpus, contexts)):
         lane_cfg = bind_lane_gpu(
-            sanitize_lane_config(cfg, allow_profile_persistence=(len(gpus) == 1)),
+            sanitize_lane_config(
+                cfg,
+                allow_profile_persistence=(len(gpus) == 1),
+                conversation_cache_mib=a.experimental_conversation_cache_mib,
+                conversation_cache_slots=a.experimental_conversation_cache_slots,
+                conversation_cache_min_free_mib=a.experimental_conversation_cache_min_free_mib,
+            ),
             gpu,
         )
         lane_vision = i in vision_lanes
@@ -1609,6 +1685,7 @@ def main() -> int:
             "kv_budget": a.kv_budget,
             "scheduler_policy": a.bench_scheduler_policy,
             "scheduler_policy_scope": "new_session_idle_lane_only",
+            "conversation_parking": {"mib_per_lane": a.experimental_conversation_cache_mib, "slots_per_lane": a.experimental_conversation_cache_slots, "min_free_mib": a.experimental_conversation_cache_min_free_mib},
             "public_host": a.host,
             "public_port": a.port,
             "base_port": a.base_port,
@@ -1654,6 +1731,8 @@ def main() -> int:
             ", ".join(f"lane {x.index}={x.kv_resident}" for x in lanes if x.kv_resident is not None),
             flush=True,
         )
+    if a.experimental_conversation_cache_mib:
+        print(f"[strata-multigpu] EXPERIMENTAL same-lane conversation parking: {a.experimental_conversation_cache_mib} MiB/lane, {a.experimental_conversation_cache_slots} slots/lane, min-free {a.experimental_conversation_cache_min_free_mib} MiB", flush=True)
     if any(x.vram_reserve_mib is not None for x in lanes):
         print(
             "[strata-multigpu] VRAM reserve MiB: " +

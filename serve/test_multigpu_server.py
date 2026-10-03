@@ -139,6 +139,14 @@ class MultiGpuPlanningTests(unittest.TestCase):
         self.assertEqual(M.option_value(got["args"], "--conversation-cache-mib"), "0")
         self.assertEqual(M.option_value(got["args"], "--conversation-cache-slots"), "4")
 
+    def test_lane_config_can_enable_experimental_same_lane_parking(self):
+        cfg = {"args": ["--pack", "/m", "--conversation-cache-mib", "0"]}
+        got = M.sanitize_lane_config(cfg, conversation_cache_mib=4096,
+                                     conversation_cache_slots=4, conversation_cache_min_free_mib=8192)
+        self.assertEqual(M.option_value(got["args"], "--conversation-cache-mib"), "4096")
+        self.assertEqual(M.option_value(got["args"], "--conversation-cache-slots"), "4")
+        self.assertEqual(M.option_value(got["args"], "--conversation-cache-min-free-mib"), "8192")
+
     def test_nonvision_lane_drops_encoder_and_vram_reserve(self):
         cfg = {"vision": {"exe": "/v", "gpu": True},
                "args": ["--pack", "/m", "--vision", "--vram-reserve-mib", "700", "--max-context", "262144"]}
@@ -1074,6 +1082,42 @@ class MultiGpuPlanningTests(unittest.TestCase):
         self.assertEqual(got.index, 1)
         pool.release(got, affinity_key="new-chat")
 
+    def test_new_session_does_not_erase_affinity_owned_by_live_wrapper_with_dead_child(self):
+        lanes = [
+            M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess()),
+            M.Lane(1, "1", 19087, 262144, Path("lane1.json"), process=_AliveProcess()),
+        ]
+        pool = M.LanePool(lanes)
+        pool.affinity["returning"] = 0
+        old_alive = M.lane_engine_alive
+        M.lane_engine_alive = lambda lane: lane.index == 1
+        try:
+            got = pool.acquire(affinity_key="new-session")
+        finally:
+            M.lane_engine_alive = old_alive
+        self.assertEqual(got.index, 1)
+        pool.release(got, affinity_key="new-session")
+        self.assertEqual(pool.affinity.get("returning"), 0)
+
+    def test_returning_affinity_can_select_wrapper_ready_child_dead_lane_for_restart(self):
+        lanes = [
+            M.Lane(0, "0", 19086, 262144, Path("lane0.json"), process=_AliveProcess()),
+            M.Lane(1, "1", 19087, 262144, Path("lane1.json"), process=_AliveProcess()),
+        ]
+        pool = M.LanePool(lanes)
+        pool.affinity["returning"] = 0
+        old_alive, old_ready = M.lane_engine_alive, M.lane_service_ready
+        M.lane_engine_alive = lambda lane: lane.index == 1
+        M.lane_service_ready = lambda lane: lane.index == 0
+        decision = {}
+        try:
+            got = pool.acquire(affinity_key="returning", decision_out=decision)
+        finally:
+            M.lane_engine_alive, M.lane_service_ready = old_alive, old_ready
+        self.assertEqual(got.index, 0)
+        self.assertEqual(decision["selected_reason"], "session_affinity_restart")
+        pool.release(got, affinity_key="returning")
+
     def test_native_arena_size_matches_arena_expert_source_contract(self):
         with tempfile.TemporaryDirectory() as td:
             p = Path(td)
@@ -1148,3 +1192,13 @@ class MultiGpuPlanningTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_lane_parking_status_extracts_latest_engine_truth(self):
+        lane = types.SimpleNamespace(index=0, port=19000, process=types.SimpleNamespace(poll=lambda: None))
+        payload = json.dumps({"requests": [{"parked_conversations": 3, "parked_bytes": 1234, "park_evictions": 2}]}).encode()
+        class R:
+            def __enter__(self): return self
+            def __exit__(self,*a): pass
+            def read(self): return payload
+        with mock.patch.object(M, "lane_engine_alive", return_value=True), mock.patch.object(M.urllib.request, "urlopen", return_value=R()):
+            self.assertEqual(M.lane_parking_status(lane), {"parked_conversations": 3, "parked_bytes": 1234, "park_evictions": 2})

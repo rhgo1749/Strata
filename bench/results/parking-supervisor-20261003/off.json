@@ -1,0 +1,365 @@
+{
+  "arm": "off",
+  "bench_start_epoch": 1791030500.6276026,
+  "scenarios": {
+    "4": {
+      "turns": [
+        {
+          "turn": 1,
+          "wall_s": 7.1709922139998525,
+          "aggregate_completion_tps": 53.54907501507544,
+          "rows": [
+            {
+              "sid": "off-n4-s0",
+              "client_s": 4.125324714997987,
+              "queue_ms": 7.065,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n4-s1",
+              "client_s": 5.412614429002133,
+              "queue_ms": 3.665,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n4-s2",
+              "client_s": 4.024188964998757,
+              "queue_ms": 2.363,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n4-s3",
+              "client_s": 7.169016725001711,
+              "queue_ms": 4021.498,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            }
+          ]
+        },
+        {
+          "turn": 2,
+          "wall_s": 5.40595082100117,
+          "aggregate_completion_tps": 71.03283265327302,
+          "rows": [
+            {
+              "sid": "off-n4-s0",
+              "client_s": 2.295169700999395,
+              "queue_ms": 2.765,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n4-s1",
+              "client_s": 3.1826335020014085,
+              "queue_ms": 6.652,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n4-s2",
+              "client_s": 5.4049761410024075,
+              "queue_ms": 2328.05,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n4-s3",
+              "client_s": 2.327351796997391,
+              "queue_ms": 2.087,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            }
+          ]
+        }
+      ]
+    },
+    "6": {
+      "turns": [
+        {
+          "turn": 1,
+          "wall_s": 9.664032388998749,
+          "aggregate_completion_tps": 59.60244924838016,
+          "rows": [
+            {
+              "sid": "off-n6-s0",
+              "client_s": 4.877200798000558,
+              "queue_ms": 3.138,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n6-s1",
+              "client_s": 3.3878775230004976,
+              "queue_ms": 2.14,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n6-s2",
+              "client_s": 6.713784610998118,
+              "queue_ms": 3388.291,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n6-s3",
+              "client_s": 3.4531586099983542,
+              "queue_ms": 5.442,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n6-s4",
+              "client_s": 6.785413493998931,
+              "queue_ms": 3453.653,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n6-s5",
+              "client_s": 9.662673545000871,
+              "queue_ms": 4876.816,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            }
+          ]
+        },
+        {
+          "turn": 2,
+          "wall_s": 9.678577663999022,
+          "aggregate_completion_tps": 59.51287678793153,
+          "rows": [
+            {
+              "sid": "off-n6-s0",
+              "client_s": 4.8923328170021705,
+              "queue_ms": 2.019,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n6-s1",
+              "client_s": 3.2512124519998906,
+              "queue_ms": 2.243,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n6-s2",
+              "client_s": 6.525094466000155,
+              "queue_ms": 3251.663,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n6-s3",
+              "client_s": 3.3420927799998026,
+              "queue_ms": 7.061,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n6-s4",
+              "client_s": 6.744284608997987,
+              "queue_ms": 3343.758,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n6-s5",
+              "client_s": 9.67693898899961,
+              "queue_ms": 4892.198,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            }
+          ]
+        }
+      ]
+    },
+    "9": {
+      "turns": [
+        {
+          "turn": 1,
+          "wall_s": 14.703902233999543,
+          "aggregate_completion_tps": 58.759911909791526,
+          "rows": [
+            {
+              "sid": "off-n9-s0",
+              "client_s": 3.4769653379989904,
+              "queue_ms": 2.396,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n9-s1",
+              "client_s": 4.820548258001509,
+              "queue_ms": 3.365,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n9-s2",
+              "client_s": 3.2840102320005826,
+              "queue_ms": 6.024,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n9-s3",
+              "client_s": 6.7088872239983175,
+              "queue_ms": 3284.955,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n9-s4",
+              "client_s": 6.724637077997613,
+              "queue_ms": 3478.462,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n9-s5",
+              "client_s": 9.848390628998459,
+              "queue_ms": 4823.239,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n9-s6",
+              "client_s": 10.191283291002037,
+              "queue_ms": 6711.496,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n9-s7",
+              "client_s": 10.297708273999888,
+              "queue_ms": 6723.828,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n9-s8",
+              "client_s": 14.70212541300134,
+              "queue_ms": 9848.392,
+              "lane": null,
+              "prompt_tokens": 1226,
+              "completion_tokens": 96
+            }
+          ]
+        },
+        {
+          "turn": 2,
+          "wall_s": 14.695881051997276,
+          "aggregate_completion_tps": 58.7919837499349,
+          "rows": [
+            {
+              "sid": "off-n9-s0",
+              "client_s": 3.4162806759995874,
+              "queue_ms": 2.238,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n9-s1",
+              "client_s": 9.883893139001884,
+              "queue_ms": 4918.167,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n9-s2",
+              "client_s": 9.965528923999955,
+              "queue_ms": 6713.577,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n9-s3",
+              "client_s": 3.3316677900002105,
+              "queue_ms": 2.917,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n9-s4",
+              "client_s": 6.8982595870002115,
+              "queue_ms": 3417.211,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n9-s5",
+              "client_s": 4.915940938000858,
+              "queue_ms": 6.505,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n9-s6",
+              "client_s": 6.7124740990002465,
+              "queue_ms": 3332.407,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n9-s7",
+              "client_s": 10.279118205999112,
+              "queue_ms": 6899.534,
+              "lane": null,
+              "prompt_tokens": 1456,
+              "completion_tokens": 96
+            },
+            {
+              "sid": "off-n9-s8",
+              "client_s": 14.693695754001965,
+              "queue_ms": 9883.228,
+              "lane": null,
+              "prompt_tokens": 1457,
+              "completion_tokens": 96
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "bench_end_epoch": 1791030561.9470484
+}

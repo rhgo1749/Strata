@@ -6007,11 +6007,13 @@ int main(int argc, char** argv) {
             // DONE <generated> <prompt> <prompt ms> <decode ms> <finish> <drafts accepted> <drafts offered> <reused> [hits] [lookups]
             //      [RAM blobs] [file blobs] [file MB]   (CS-T tiers; appended, so an older server reads the rest)
             //      [prompt tokens read]   (#471: fewer than <prompt> - <reused> when a cancel stopped the read)
-            std::printf("DONE %lld %lld %.1f %.1f %s %lld %lld %lld %lld %lld %lld %lld %.1f %lld\n", (long long) produced_n,
+            //      [parked conversations] [parked bytes] [park evictions]   (appended for lane-local parking telemetry)
+            std::printf("DONE %lld %lld %.1f %.1f %s %lld %lld %lld %lld %lld %lld %lld %.1f %lld %zu %zu %zu\n", (long long) produced_n,
                         (long long) n, prompt_ms, decode_ms, finish, (long long) draft_accepted, (long long) draft_offered,
                         (long long) resume, (long long) req_hits, (long long) req_look,
                         (long long) (src.ram_reads() - ram0), (long long) (src.file_reads() - files0),
-                        (double) (src.file_read_bytes() - file_bytes0) / 1e6, (long long) read_n);
+                        (double) (src.file_read_bytes() - file_bytes0) / 1e6, (long long) read_n,
+                        conversations.size(), conversations.bytes(), conversations.evictions());
             std::fflush(stdout);
             if (drive.routing != nullptr) std::fflush(drive.routing);   // the routing trace survives a crash and is watchable mid-session
             // "12288 of 98179" when cancelled mid-read (#471), the rate from what was read

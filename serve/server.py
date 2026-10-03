@@ -443,6 +443,8 @@ class StrataEngine:
             self.last.update(ram_blobs=int(f[11]), file_blobs=int(f[12]), file_mb=float(f[13]))
         if len(f) >= 15:                                  # #471 (engine 0.1.36+): the prompt tokens actually read
             self.last.update(prompt_read=int(f[14]))
+        if len(f) >= 18:                                  # lane-local conversation parking telemetry
+            self.last.update(parked_conversations=int(f[15]), parked_bytes=int(f[16]), park_evictions=int(f[17]))
 
     @staticmethod
     def sampling_keys(sampling: dict) -> str:
@@ -1570,7 +1572,10 @@ class Service:
                                 "file_blobs": last.get("file_blobs"), "file_mb": last.get("file_mb"),
                                 # #457: the speculative drafts from the DONE line (None: the engine did not say)
                                 "drafts_offered": last.get("drafts_offered"),
-                                "drafts_accepted": last.get("drafts_accepted")})
+                                "drafts_accepted": last.get("drafts_accepted"),
+                                "parked_conversations": last.get("parked_conversations"),
+                                "parked_bytes": last.get("parked_bytes"),
+                                "park_evictions": last.get("park_evictions")})
                             t = self.totals
                             t["requests"] += 1
                             t["prompt_tokens"] += seen
