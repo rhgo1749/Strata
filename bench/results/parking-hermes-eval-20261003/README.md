@@ -4,7 +4,7 @@ This record captures the first live-use validation of lane-local conversation pa
 
 ## Contract
 
-- public path: `127.0.0.1:8087` idle/wake proxy → `127.0.0.1:18087` three-lane supervisor;
+- serving path under test: the standard three-lane Lanes supervisor in the reference-host deployment;
 - three production lanes: RTX 5070 Ti ×3 (GPU0/GPU1/GPU2);
 - RTX 5060 Ti excluded from the serving pool;
 - Strata 0.1.38 with the promoted parking/telemetry/recovery patchset;

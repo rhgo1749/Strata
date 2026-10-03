@@ -121,6 +121,23 @@ Sizes, downloads and what fits where: [docs/MODELS.md](docs/MODELS.md). You can 
 
 ## Using it
 
+### Multi-lane mode in this fork
+
+The upstream-style single-engine server remains available, while **Strata-Lanes multi-lane serving is started directly with `serve/multigpu_server.py`**.
+
+A minimal shape is:
+
+```bash
+python3 serve/multigpu_server.py \
+  --config /path/to/strata.json \
+  --gpus 0,1,2 \
+  --port 18086 \
+  --base-port 19086 \
+  --arena-file /dev/shm/strata-lanes.shared
+```
+
+For long-lived chats/agents, send a stable `X-Strata-Session-Id` on every turn so the conversation stays on its remembered lane. Conversation parking, vision-lane selection, CPU/PCIe/KV partitioning, status/trace endpoints, recovery semantics and a complete launch example are documented in **[Strata-Lanes multi-lane usage](docs/LANES_USAGE.md)**.
+
 <p align="center"><img src="docs/media/runpagoda.png" width="900" alt="The Strata app's Monitor tab next to a coding agent"><br>
 <sub>The Strata app's <b>Monitor</b> (left) while a coding agent writes the pagoda garden from the video (right)</sub></p>
 
@@ -134,8 +151,7 @@ Sizes, downloads and what fits where: [docs/MODELS.md](docs/MODELS.md). You can 
 - **Pictures:** say yes to "Images?" in setup, then click **Picture** in the chat, or attach them in your app
   (AMD cards: on Linux through the processor, not on Windows yet).
 - **From your phone or another PC:** `START-HERE.bat --setup --host 0.0.0.0 --api-key <secret>` - always with a key.
-- **Good to know:** it answers one request at a time. The first message of a chat is read in full (about 1 minute
-  per 30,000 tokens); follow-ups start in seconds.
+- **Good to know:** the ordinary single-engine server answers one generation request at a time. In **Strata-Lanes multi-lane mode**, each lane still runs one active generation, while separate lanes can serve separate requests concurrently. The first message of a chat is read in full; follow-ups can reuse lane-local state when session affinity is preserved.
 
 More: [where your chats are stored](docs/INSTALL.md#where-things-are-stored), [the API](docs/DETAILS.md#using-it).
 

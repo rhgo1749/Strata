@@ -14,7 +14,7 @@ The canary duplicates the production serving topology while staying on isolated 
 - same production model/config and sampling defaults;
 - parking opt-in: **4096 MiB / 4 slots per lane**, host `MemAvailable` floor **8192 MiB**.
 
-The public production idle proxy/backend was left parked. The canary ran only on isolated ports 19800/19810-19812.
+The reference-host deployment backend was left inactive. The canary ran only on isolated supervisor/lane ports 19800/19810-19812.
 
 ## Normal-operation canary
 
@@ -30,9 +30,9 @@ First isolated run:
 
 After turn 3, all lanes were healthy/idle, each owned two affinity sessions, each reported one parked conversation, and engine-truth eviction count remained zero.
 
-## Production-launcher canary
+## Reference-host launcher canary
 
-The local production launcher was extended with bounded opt-in environment variables while preserving `STRATA_CONVERSATION_CACHE_MIB=0` as the default. The launcher was then started on isolated canary ports with 4096/4/8192 parking settings and the same production vision topology.
+The reference-host launcher was extended with bounded opt-in environment variables while preserving `STRATA_CONVERSATION_CACHE_MIB=0` as the default. It was started on isolated canary ports with 4096/4/8192 parking settings and the same vision topology.
 
 Second run through that launcher:
 

@@ -1,15 +1,15 @@
-# Lane-local parking production-path soak — 2026-10-03
+# Lane-local parking reference-host deployment soak — 2026-10-03
 
-This experiment uses the **actual production public path** (`127.0.0.1:8087` idle/wake proxy → `127.0.0.1:18087` three-lane supervisor), not the isolated canary ports. It is still a deterministic mixed synthetic/agent-like workload rather than organic user traffic, so the result is a production-path soak rather than a claim about every real workload.
+This experiment exercised the standard three-lane Lanes supervisor through the reference-host deployment path. The workload is deterministic mixed synthetic/agent-like traffic rather than organic user traffic.
 
 ## Contract and rollback
 
-The promoted production backend was parked before the matched A/B. The production config was temporarily pointed at the already validated patched `build/strata` binary (SHA256 `a1793a6e3f65dc271f8fa1af6148b374aac7398e431b3f94e40010846049a3bd`). Both arms therefore use the same engine binary, model, topology, CPU/PCIe/KV partitions, vision lane, public idle proxy, request bodies, session IDs, and deterministic sampling.
+The reference deployment backend was stopped before the matched A/B. The serving config was temporarily pointed at the already validated patched `build/strata` binary (SHA256 `a1793a6e3f65dc271f8fa1af6148b374aac7398e431b3f94e40010846049a3bd`). Both arms therefore use the same engine binary, model, topology, CPU/PCIe/KV partitions, vision lane, deployment path, request bodies, session IDs, and deterministic sampling.
 
 - OFF: `--conversation-cache-mib 0`
 - ON: `--conversation-cache-mib 4096 --conversation-cache-slots 4 --conversation-cache-min-free-mib 8192`
 - six stable sessions, mixed coding/research/ops/design/debug/planning prompts;
-- three concurrent turns through public port 8087;
+- three concurrent turns through the same reference-host deployment entry point;
 - six sessions resolve to two affinities per lane.
 
 After measurement the backend was explicitly parked and the production config/launcher were restored to the promoted `engine/strata` binary and parking default `0`.
@@ -36,7 +36,7 @@ At the end of the matched OFF arm all three engines reported zero parked convers
 
 ## RAM telemetry caveat
 
-The ON resource monitor began before the idle proxy woke the backend, so its initial `MemAvailable` drop includes shared-arena/model/runtime startup and must **not** be attributed to parking. Engine-reported parked bytes are the clean accounting signal for this run. The 8192 MiB physical-RAM floor remained configured throughout.
+The ON resource monitor began before the deployment wrapper started the backend, so its initial `MemAvailable` drop includes shared-arena/model/runtime startup and must **not** be attributed to parking. Engine-reported parked bytes are the clean accounting signal for this run. The 8192 MiB physical-RAM floor remained configured throughout.
 
 ## Initial false baseline
 
@@ -44,4 +44,4 @@ An earlier OFF pass in this same directory attached to a production backend that
 
 ## Decision
 
-The actual production path reproduces the earlier supervisor/canary benefit with the confound removed: same patched engine, parking as the only intended serving-state difference. This gate passes for mixed synthetic/agent-like returning sessions. The implementation should remain **opt-in/default OFF** until a short organic-use observation confirms bounded RAM/evictions and no latency or recovery regression under the user's natural workload. No further synthetic throughput sweep is required before that observation.
+The reference-host deployment path reproduces the earlier direct-supervisor/canary benefit with the confound removed: same patched engine, parking as the only intended serving-state difference. This gate passes for mixed synthetic/agent-like returning sessions. The implementation should remain **opt-in/default OFF** until a short organic-use observation confirms bounded RAM/evictions and no latency or recovery regression under the user's natural workload. No further synthetic throughput sweep is required before that observation.
